@@ -28,11 +28,19 @@ import { createApp } from "./app.js";
 import { loadConfig } from "./config.js";
 import { logger } from "./middleware/logger.js";
 import { setupLiveEventsWebSocketServer } from "./realtime/live-events-ws.js";
-import { heartbeatService, issueService, reconcilePersistedRuntimeServicesOnStartup, routineService } from "./services/index.js";
+import {
+  feedbackService,
+  heartbeatService,
+  issueService,
+  reconcilePersistedRuntimeServicesOnStartup,
+  routineService,
+} from "./services/index.js";
+import { createFeedbackTraceShareClientFromConfig } from "./services/feedback-share-client.js";
 import { createStorageServiceFromConfig } from "./storage/index.js";
 import { printStartupBanner } from "./startup-banner.js";
 import { getBoardClaimWarningUrl, initializeBoardClaimChallenge } from "./board-claim.js";
 import { maybePersistWorktreeRuntimePorts } from "./worktree-config.js";
+import { initTelemetry, getTelemetryClient } from "./telemetry.js";
 
 type BetterAuthSessionUser = {
   id: string;
@@ -73,6 +81,7 @@ export interface StartedServer {
 
 export async function startServer(): Promise<StartedServer> {
   let config = loadConfig();
+  initTelemetry({ enabled: config.telemetryEnabled });
   if (process.env.PAPERCLIP_SECRETS_PROVIDER === undefined) {
     process.env.PAPERCLIP_SECRETS_PROVIDER = config.secretsProvider;
   }
@@ -515,10 +524,14 @@ export async function startServer(): Promise<StartedServer> {
   });
   const uiMode = config.uiDevMiddleware ? "vite-dev" : config.serveUi ? "static" : "none";
   const storageService = createStorageServiceFromConfig(config);
+  const feedback = feedbackService(db as any, {
+    shareClient: createFeedbackTraceShareClientFromConfig(config),
+  });
   const app = await createApp(db as any, {
     uiMode,
     serverPort: listenPort,
     storageService,
+    feedbackExportService: feedback,
     deploymentMode: config.deploymentMode,
     deploymentExposure: config.deploymentExposure,
     allowedHostnames: config.allowedHostnames,
@@ -763,17 +776,24 @@ export async function startServer(): Promise<StartedServer> {
   const shutdown = async (signal: string) => {
     logger.info({ signal }, "Received signal, shutting down gracefully");
 
-    // 1. Stop accepting new connections
+    // 1. Flush telemetry before stopping
+    const telemetryClient = getTelemetryClient();
+    if (telemetryClient) {
+      telemetryClient.stop();
+      await telemetryClient.flush();
+    }
+
+    // 2. Stop accepting new connections
     server.close(() => {
       logger.info("HTTP server closed");
     });
 
-    // 2. Clear all scheduled intervals
+    // 3. Clear all scheduled intervals
     if (heartbeatInterval !== null) clearInterval(heartbeatInterval);
     if (archiveSweepInterval !== null) clearInterval(archiveSweepInterval);
     if (backupInterval !== null) clearInterval(backupInterval);
 
-    // 3. Stop embedded PostgreSQL if this process owns it
+    // 4. Stop embedded PostgreSQL if this process owns it
     if (embeddedPostgres && embeddedPostgresStartedByThisProcess) {
       try {
         await embeddedPostgres.stop();
@@ -783,14 +803,14 @@ export async function startServer(): Promise<StartedServer> {
       }
     }
 
-    // 4. Close the DB connection pool
+    // 5. Close the DB connection pool
     try {
       await (db as any).$client?.end();
     } catch (err) {
       logger.error({ err }, "Failed to close DB connection pool cleanly");
     }
 
-    // 5. Force-exit after a grace period in case of hung connections
+    // 6. Force-exit after a grace period in case of hung connections
     setTimeout(() => process.exit(0), 5000).unref();
   };
 

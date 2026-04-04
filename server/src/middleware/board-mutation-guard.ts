@@ -28,12 +28,26 @@ function trustedOriginsForConfig(allowedHostnames: string[]): Set<string> {
   return origins;
 }
 
+function trustedOriginsForRequest(req: Request): Set<string> {
+  const origins = new Set<string>();
+  const forwardedHost = req.header("x-forwarded-host")?.split(",")[0]?.trim();
+  const host = forwardedHost || req.header("host")?.trim();
+  if (host) {
+    origins.add(`http://${host}`.toLowerCase());
+    origins.add(`https://${host}`.toLowerCase());
+  }
+  return origins;
+}
+
 function isTrustedBoardMutationRequest(req: Request, allowedOrigins: Set<string>) {
+  const requestOrigins = trustedOriginsForRequest(req);
+  const effectiveOrigins = new Set([...allowedOrigins, ...requestOrigins]);
+
   const origin = parseOrigin(req.header("origin"));
-  if (origin && allowedOrigins.has(origin)) return true;
+  if (origin && effectiveOrigins.has(origin)) return true;
 
   const refererOrigin = parseOrigin(req.header("referer"));
-  if (refererOrigin && allowedOrigins.has(refererOrigin)) return true;
+  if (refererOrigin && effectiveOrigins.has(refererOrigin)) return true;
 
   return false;
 }
