@@ -28,7 +28,7 @@ import { createApp } from "./app.js";
 import { loadConfig } from "./config.js";
 import { logger } from "./middleware/logger.js";
 import { setupLiveEventsWebSocketServer } from "./realtime/live-events-ws.js";
-import { heartbeatService, reconcilePersistedRuntimeServicesOnStartup, routineService } from "./services/index.js";
+import { heartbeatService, issueService, reconcilePersistedRuntimeServicesOnStartup, routineService } from "./services/index.js";
 import { createStorageServiceFromConfig } from "./storage/index.js";
 import { printStartupBanner } from "./startup-banner.js";
 import { getBoardClaimWarningUrl, initializeBoardClaimChallenge } from "./board-claim.js";
@@ -565,6 +565,7 @@ export async function startServer(): Promise<StartedServer> {
   if (config.heartbeatSchedulerEnabled) {
     const heartbeat = heartbeatService(db as any);
     const routines = routineService(db as any);
+    const issues = issueService(db as any);
   
     // Reap orphaned running runs at startup while in-memory execution state is empty,
     // then resume any persisted queued runs that were waiting on the previous process.
@@ -604,6 +605,17 @@ export async function startServer(): Promise<StartedServer> {
         .then(() => heartbeat.resumeQueuedRuns())
         .catch((err) => {
           logger.error({ err }, "periodic heartbeat recovery failed");
+        });
+
+      void issues
+        .sweepAgentArchives()
+        .then((result) => {
+          if (result.archived > 0) {
+            logger.info({ archived: result.archived }, "agent archive sweep archived tickets");
+          }
+        })
+        .catch((err) => {
+          logger.error({ err }, "agent archive sweep failed");
         });
     }, config.heartbeatSchedulerIntervalMs);
   }
