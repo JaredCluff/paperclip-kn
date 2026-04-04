@@ -16,18 +16,18 @@ function parseOrigin(value: string | undefined) {
   }
 }
 
-function trustedOriginsForRequest(req: Request) {
+function trustedOriginsForConfig(allowedHostnames: string[]): Set<string> {
   const origins = new Set(DEFAULT_DEV_ORIGINS.map((value) => value.toLowerCase()));
-  const host = req.header("host")?.trim();
-  if (host) {
-    origins.add(`http://${host}`.toLowerCase());
-    origins.add(`https://${host}`.toLowerCase());
+  for (const hostname of allowedHostnames) {
+    const trimmed = hostname.trim().toLowerCase();
+    if (!trimmed) continue;
+    origins.add(`http://${trimmed}`);
+    origins.add(`https://${trimmed}`);
   }
   return origins;
 }
 
-function isTrustedBoardMutationRequest(req: Request) {
-  const allowedOrigins = trustedOriginsForRequest(req);
+function isTrustedBoardMutationRequest(req: Request, allowedOrigins: Set<string>) {
   const origin = parseOrigin(req.header("origin"));
   if (origin && allowedOrigins.has(origin)) return true;
 
@@ -37,7 +37,9 @@ function isTrustedBoardMutationRequest(req: Request) {
   return false;
 }
 
-export function boardMutationGuard(): RequestHandler {
+export function boardMutationGuard(options?: { allowedHostnames?: string[] }): RequestHandler {
+  const allowedOrigins = trustedOriginsForConfig(options?.allowedHostnames ?? []);
+
   return (req, res, next) => {
     if (SAFE_METHODS.has(req.method.toUpperCase())) {
       next();
@@ -56,7 +58,7 @@ export function boardMutationGuard(): RequestHandler {
       return;
     }
 
-    if (!isTrustedBoardMutationRequest(req)) {
+    if (!isTrustedBoardMutationRequest(req, allowedOrigins)) {
       res.status(403).json({ error: "Board mutation requires trusted browser origin" });
       return;
     }
