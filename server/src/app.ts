@@ -89,6 +89,11 @@ export async function createApp(
 ) {
   const app = express();
 
+  // Trust the first reverse proxy so req.ip is the real client IP for rate limiting.
+  // Do not set to true (trusts all X-Forwarded-For hops) or a number > 1 unless
+  // there are multiple proxy layers in front of this server.
+  app.set("trust proxy", 1);
+
   app.use(helmet({
     contentSecurityPolicy: false, // UI handles its own CSP
     crossOriginEmbedderPolicy: false, // needed for plugin UIs
@@ -97,6 +102,15 @@ export async function createApp(
   const authRateLimit = rateLimit({
     windowMs: 15 * 60 * 1000, // 15 minutes
     max: 50, // 50 auth attempts per 15 min per IP
+    standardHeaders: true,
+    legacyHeaders: false,
+    message: { error: "Too many requests, please try again later" },
+  });
+
+  // Separate, stricter rate limit for invite token endpoints (brute-force surface)
+  const inviteRateLimit = rateLimit({
+    windowMs: 15 * 60 * 1000, // 15 minutes
+    max: 30, // 30 invite lookups per 15 min per IP
     standardHeaders: true,
     legacyHeaders: false,
     message: { error: "Too many requests, please try again later" },
@@ -245,6 +259,7 @@ export async function createApp(
       { workerManager },
     ),
   );
+  api.use("/invites", inviteRateLimit);
   api.use(
     accessRoutes(db, {
       deploymentMode: opts.deploymentMode,
@@ -299,10 +314,12 @@ export async function createApp(
     });
 
     app.use(vite.middlewares);
+    const viteSpaTemplatePath = path.resolve(uiRoot, "index.html");
     app.get(/.*/, async (req, res, next) => {
       try {
-        const templatePath = path.resolve(uiRoot, "index.html");
-        const template = fs.readFileSync(templatePath, "utf-8");
+        // Read fresh on each request in dev mode so Vite HMR changes take effect,
+        // but use async I/O to avoid blocking the event loop.
+        const template = await fs.promises.readFile(viteSpaTemplatePath, "utf-8");
         const html = applyUiBranding(await vite.transformIndexHtml(req.originalUrl, template));
         res.status(200).set({ "Content-Type": "text/html" }).end(html);
       } catch (err) {

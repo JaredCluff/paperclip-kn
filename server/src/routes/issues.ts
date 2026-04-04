@@ -3,6 +3,8 @@ import multer from "multer";
 import { z } from "zod";
 import type { Db } from "@paperclipai/db";
 import {
+  ISSUE_STATUSES,
+  ISSUE_ORIGIN_KINDS,
   addIssueCommentSchema,
   createIssueAttachmentMetadataSchema,
   createIssueWorkProductSchema,
@@ -346,8 +348,21 @@ export function issueRoutes(
     const limit = !isNaN(rawLimit) && rawLimit > 0 ? Math.min(rawLimit, MAX_ISSUES_LIMIT) : 500;
     const offset = !isNaN(rawOffset) && rawOffset >= 0 ? Math.min(rawOffset, MAX_ISSUES_OFFSET) : undefined;
 
+    const statusRaw = req.query.status as string | undefined;
+    const originKindRaw = req.query.originKind as string | undefined;
+
+    // Validate enum query params against allowlists to reject junk values early
+    if (statusRaw !== undefined && !(ISSUE_STATUSES as readonly string[]).includes(statusRaw)) {
+      res.status(400).json({ error: `Invalid status: must be one of ${ISSUE_STATUSES.join(", ")}` });
+      return;
+    }
+    if (originKindRaw !== undefined && !(ISSUE_ORIGIN_KINDS as readonly string[]).includes(originKindRaw)) {
+      res.status(400).json({ error: `Invalid originKind: must be one of ${ISSUE_ORIGIN_KINDS.join(", ")}` });
+      return;
+    }
+
     const result = await svc.list(companyId, {
-      status: req.query.status as string | undefined,
+      status: statusRaw,
       assigneeAgentId: req.query.assigneeAgentId as string | undefined,
       participantAgentId: req.query.participantAgentId as string | undefined,
       assigneeUserId,
@@ -358,7 +373,7 @@ export function issueRoutes(
       executionWorkspaceId: req.query.executionWorkspaceId as string | undefined,
       parentId: req.query.parentId as string | undefined,
       labelId: req.query.labelId as string | undefined,
-      originKind: req.query.originKind as string | undefined,
+      originKind: originKindRaw,
       originId: req.query.originId as string | undefined,
       includeRoutineExecutions:
         req.query.includeRoutineExecutions === "true" || req.query.includeRoutineExecutions === "1",

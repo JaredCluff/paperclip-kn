@@ -3802,25 +3802,30 @@ export function heartbeatService(db: Db) {
       .from(heartbeatRuns)
       .where(and(eq(heartbeatRuns.agentId, agentId), inArray(heartbeatRuns.status, ["queued", "running"])));
 
+    // Kill processes synchronously before any DB work
     for (const run of runs) {
-      await setRunStatus(run.id, "cancelled", {
-        finishedAt: new Date(),
-        error: reason,
-        errorCode: "cancelled",
-      });
-
-      await setWakeupStatus(run.wakeupRequestId, "cancelled", {
-        finishedAt: new Date(),
-        error: reason,
-      });
-
       const running = runningProcesses.get(run.id);
       if (running) {
         running.child.kill("SIGTERM");
         runningProcesses.delete(run.id);
       }
-      await releaseIssueExecutionAndPromote(run);
     }
+
+    // Parallelize DB updates across runs (each run is independent)
+    await Promise.all(
+      runs.map(async (run) => {
+        await setRunStatus(run.id, "cancelled", {
+          finishedAt: new Date(),
+          error: reason,
+          errorCode: "cancelled",
+        });
+        await setWakeupStatus(run.wakeupRequestId, "cancelled", {
+          finishedAt: new Date(),
+          error: reason,
+        });
+        await releaseIssueExecutionAndPromote(run);
+      }),
+    );
 
     return runs.length;
   }
@@ -3846,9 +3851,7 @@ export function heartbeatService(db: Db) {
           .then((rows) => rows.map((row) => row.id))
         : await listProjectScopedRunIds(scope.companyId, scope.scopeId);
 
-    for (const runId of runIds) {
-      await cancelRunInternal(runId, "Cancelled due to budget pause");
-    }
+    await Promise.all(runIds.map((runId) => cancelRunInternal(runId, "Cancelled due to budget pause")));
 
     await cancelPendingWakeupsForBudgetScope(scope);
   }

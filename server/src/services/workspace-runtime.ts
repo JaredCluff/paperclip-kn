@@ -123,16 +123,42 @@ function stableStringify(value: unknown): string {
   return JSON.stringify(value);
 }
 
+// Credential-bearing env var prefixes and exact names that must never reach agent processes
+const SANITIZE_PREFIXES = [
+  "PAPERCLIP_",
+  "AWS_",
+  "GCP_",
+  "GOOGLE_",
+  "AZURE_",
+  "GITHUB_",
+  "GITLAB_",
+  "npm_config_",
+];
+const SANITIZE_EXACT = new Set([
+  "DATABASE_URL",
+  "DATABASE_DIRECT_URL",
+  "STRIPE_SECRET_KEY",
+  "STRIPE_WEBHOOK_SECRET",
+  "OPENAI_API_KEY",
+  "ANTHROPIC_API_KEY",
+  "SENDGRID_API_KEY",
+  "SLACK_BOT_TOKEN",
+  "SLACK_SIGNING_SECRET",
+  "TAILSCALE_AUTH_KEY",
+  "NODE_EXTRA_CA_CERTS",
+  "NODE_TLS_REJECT_UNAUTHORIZED",
+]);
+
 export function sanitizeRuntimeServiceBaseEnv(baseEnv: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
   const env: NodeJS.ProcessEnv = { ...baseEnv };
   for (const key of Object.keys(env)) {
-    if (key.startsWith("PAPERCLIP_")) {
+    if (
+      SANITIZE_EXACT.has(key) ||
+      SANITIZE_PREFIXES.some((prefix) => key.startsWith(prefix))
+    ) {
       delete env[key];
     }
   }
-  delete env.DATABASE_URL;
-  delete env.npm_config_tailscale_auth;
-  delete env.npm_config_authenticated_private;
   return env;
 }
 
