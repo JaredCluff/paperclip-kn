@@ -861,7 +861,8 @@ export function issueService(db: Db) {
                 AND ${issueAgentArchives.agentId} = ${issues.assigneeAgentId}
             )`,
           ),
-        );
+        )
+        .limit(500);
 
       if (eligible.length === 0) return { archived: 0 };
 

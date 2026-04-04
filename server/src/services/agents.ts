@@ -265,8 +265,12 @@ export function agentService(db: Db) {
     let cursor: string | null = reportsTo;
     while (cursor) {
       if (cursor === agentId) throw unprocessable("Reporting relationship would create cycle");
-      const next = await getById(cursor);
-      cursor = next?.reportsTo ?? null;
+      const row = await db
+        .select({ reportsTo: agents.reportsTo })
+        .from(agents)
+        .where(eq(agents.id, cursor))
+        .then((rows) => rows[0] ?? null);
+      cursor = row?.reportsTo ?? null;
     }
   }
 

@@ -575,41 +575,54 @@ export async function startServer(): Promise<StartedServer> {
       .catch((err) => {
         logger.error({ err }, "startup heartbeat recovery failed");
       });
-    setInterval(() => {
-      void heartbeat
-        .tickTimers(new Date())
-        .then((result) => {
-          if (result.enqueued > 0) {
-            logger.info({ ...result }, "heartbeat timer tick enqueued runs");
-          }
-        })
-        .catch((err) => {
-          logger.error({ err }, "heartbeat timer tick failed");
-        });
+    let heartbeatTickInFlight = false;
 
-      void routines
-        .tickScheduledTriggers(new Date())
-        .then((result) => {
-          if (result.triggered > 0) {
-            logger.info({ ...result }, "routine scheduler tick enqueued runs");
-          }
-        })
-        .catch((err) => {
-          logger.error({ err }, "routine scheduler tick failed");
-        });
-  
-      // Periodically reap orphaned runs (5-min staleness threshold) and make sure
-      // persisted queued work is still being driven forward.
-      void heartbeat
-        .reapOrphanedRuns({ staleThresholdMs: 5 * 60 * 1000 })
-        .then(() => heartbeat.resumeQueuedRuns())
+    setInterval(() => {
+      if (heartbeatTickInFlight) {
+        logger.warn("Skipping heartbeat tick because previous tick is still running");
+        return;
+      }
+      heartbeatTickInFlight = true;
+
+      const tick = async () => {
+        // tickTimers and routines can run in parallel
+        const [timerResult, routineResult] = await Promise.allSettled([
+          heartbeat.tickTimers(new Date()),
+          routines.tickScheduledTriggers(new Date()),
+        ]);
+
+        if (timerResult.status === "fulfilled" && timerResult.value.enqueued > 0) {
+          logger.info({ ...timerResult.value }, "heartbeat timer tick enqueued runs");
+        } else if (timerResult.status === "rejected") {
+          logger.error({ err: timerResult.reason }, "heartbeat timer tick failed");
+        }
+
+        if (routineResult.status === "fulfilled" && routineResult.value.triggered > 0) {
+          logger.info({ ...routineResult.value }, "routine scheduler tick enqueued runs");
+        } else if (routineResult.status === "rejected") {
+          logger.error({ err: routineResult.reason }, "routine scheduler tick failed");
+        }
+
+        // Periodically reap orphaned runs (5-min staleness threshold) and make sure
+        // persisted queued work is still being driven forward.
+        await heartbeat.reapOrphanedRuns({ staleThresholdMs: 5 * 60 * 1000 });
+        await heartbeat.resumeQueuedRuns();
+      };
+
+      void tick()
         .catch((err) => {
           logger.error({ err }, "periodic heartbeat recovery failed");
+        })
+        .finally(() => {
+          heartbeatTickInFlight = false;
         });
 
     }, config.heartbeatSchedulerIntervalMs);
 
+  let archiveSweepInFlight = false;
   setInterval(() => {
+    if (archiveSweepInFlight) return;
+    archiveSweepInFlight = true;
     void issues
       .sweepAgentArchives()
       .then((result) => {
@@ -619,6 +632,9 @@ export async function startServer(): Promise<StartedServer> {
       })
       .catch((err) => {
         logger.error({ err }, "agent archive sweep failed");
+      })
+      .finally(() => {
+        archiveSweepInFlight = false;
       });
   }, 15 * 60 * 1000);
   }
