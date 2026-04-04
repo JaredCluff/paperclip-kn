@@ -89,6 +89,18 @@ export async function claimBoardOwnership(
   const status = getChallengeStatus(opts.token, opts.code);
   if (status !== "available") return { status };
 
+  // Atomically mark the challenge as claimed before touching the database.
+  // This closes the TOCTOU window: if two concurrent requests both pass
+  // getChallengeStatus above, only the first to reach this block will see
+  // claimedAt === null and proceed; the second will find claimedAt already set
+  // and bail out immediately, preventing a double-claim.
+  const claimedAt = new Date();
+  if (!activeChallenge || activeChallenge.token !== opts.token || activeChallenge.claimedAt) {
+    return { status: "claimed" };
+  }
+  activeChallenge.claimedAt = claimedAt;
+  activeChallenge.claimedByUserId = opts.userId;
+
   await db.transaction(async (tx) => {
     const existingTargetAdmin = await tx
       .select({ id: instanceUserRoles.id })
@@ -139,11 +151,6 @@ export async function claimBoardOwnership(
       }
     }
   });
-
-  if (activeChallenge && activeChallenge.token === opts.token) {
-    activeChallenge.claimedAt = new Date();
-    activeChallenge.claimedByUserId = opts.userId;
-  }
 
   return { status: "claimed", claimedByUserId: opts.userId };
 }

@@ -48,6 +48,7 @@ import {
   notifyHireApproved
 } from "../services/index.js";
 import { assertCompanyAccess } from "./authz.js";
+import { assertNotSsrfTarget } from "../adapters/ssrf.js";
 import {
   claimBoardOwnership,
   inspectBoardClaimChallenge
@@ -59,7 +60,7 @@ function hashToken(token: string) {
 
 const INVITE_TOKEN_PREFIX = "pcp_invite_";
 const INVITE_TOKEN_ALPHABET = "abcdefghijklmnopqrstuvwxyz0123456789";
-const INVITE_TOKEN_SUFFIX_LENGTH = 8;
+const INVITE_TOKEN_SUFFIX_LENGTH = 32;
 const INVITE_TOKEN_MAX_RETRIES = 5;
 const COMPANY_INVITE_TTL_MS = 10 * 60 * 1000;
 
@@ -1491,6 +1492,7 @@ async function probeInviteResolutionTarget(
   url: URL,
   timeoutMs: number
 ): Promise<InviteResolutionProbe> {
+  await assertNotSsrfTarget(url.toString());
   const startedAt = Date.now();
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), timeoutMs);
