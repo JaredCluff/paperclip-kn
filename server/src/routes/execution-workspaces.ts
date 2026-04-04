@@ -1,5 +1,6 @@
 import { and, eq } from "drizzle-orm";
 import { Router } from "express";
+import { z } from "zod";
 import type { Db } from "@paperclipai/db";
 import { issues, projects, projectWorkspaces } from "@paperclipai/db";
 import { updateExecutionWorkspaceSchema } from "@paperclipai/shared";
@@ -15,20 +16,45 @@ import {
 } from "../services/workspace-runtime.js";
 import { assertCompanyAccess, getActorInfo } from "./authz.js";
 
+const TERMINAL_ISSUE_STATUSES = new Set(["done", "cancelled"]);
+
+const listQuerySchema = z.object({
+  projectId: z.string().uuid().optional(),
+  projectWorkspaceId: z.string().uuid().optional(),
+  issueId: z.string().uuid().optional(),
+  // Comma-separated list of status values; each token must be a valid enum member.
+  status: z
+    .string()
+    .optional()
+    .refine(
+      (val) => {
+        if (val === undefined) return true;
+        const valid = new Set(["active", "idle", "in_review", "archived", "cleanup_failed"]);
+        return val.split(",").every((token) => valid.has(token.trim()));
+      },
+      { message: "status must be one or more of: active, idle, in_review, archived, cleanup_failed" },
+    ),
+  reuseEligible: z.enum(["true", "false"]).optional(),
+});
+
+
 export function executionWorkspaceRoutes(db: Db) {
   const router = Router();
   const svc = executionWorkspaceService(db);
   const workspaceOperationsSvc = workspaceOperationService(db);
 
   router.get("/companies/:companyId/execution-workspaces", async (req, res) => {
+    // companyId is always taken from the URL path; query params must never override it.
     const companyId = req.params.companyId as string;
     assertCompanyAccess(req, companyId);
+
+    const query = listQuerySchema.parse(req.query);
     const workspaces = await svc.list(companyId, {
-      projectId: req.query.projectId as string | undefined,
-      projectWorkspaceId: req.query.projectWorkspaceId as string | undefined,
-      issueId: req.query.issueId as string | undefined,
-      status: req.query.status as string | undefined,
-      reuseEligible: req.query.reuseEligible === "true",
+      projectId: query.projectId,
+      projectWorkspaceId: query.projectWorkspaceId,
+      issueId: query.issueId,
+      status: query.status,
+      reuseEligible: query.reuseEligible === "true",
     });
     res.json(workspaces);
   });

@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import type { BudgetPolicySummary } from "@paperclipai/shared";
-import { AlertTriangle, PauseCircle, ShieldAlert, Wallet } from "lucide-react";
+import { AlertTriangle, PauseCircle, ShieldAlert, Wallet, Zap } from "lucide-react";
 import { cn, formatCents } from "../lib/utils";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
@@ -31,17 +31,22 @@ function statusTone(status: BudgetPolicySummary["status"]) {
 export function BudgetPolicyCard({
   summary,
   onSave,
+  onSaveVelocity,
   isSaving,
   compact = false,
   variant = "card",
 }: {
   summary: BudgetPolicySummary;
   onSave?: (amountCents: number) => void;
+  onSaveVelocity?: (input: { velocityWindowMinutes: number | null; velocityWarnCents: number | null; velocityHardCents: number | null }) => void;
   isSaving?: boolean;
   compact?: boolean;
   variant?: "card" | "plain";
 }) {
   const [draftBudget, setDraftBudget] = useState(centsInputValue(summary.amount));
+  const [draftVelocityWindow, setDraftVelocityWindow] = useState(String(summary.velocityWindowMinutes ?? ""));
+  const [draftVelocityWarn, setDraftVelocityWarn] = useState(summary.velocityWarnCents != null ? centsInputValue(summary.velocityWarnCents) : "");
+  const [draftVelocityHard, setDraftVelocityHard] = useState(summary.velocityHardCents != null ? centsInputValue(summary.velocityHardCents) : "");
 
   useEffect(() => {
     setDraftBudget(centsInputValue(summary.amount));
@@ -151,6 +156,91 @@ export function BudgetPolicyCard({
     </div>
   ) : null;
 
+  const parsedVelocityWindow = draftVelocityWindow.trim() === "" ? null : parseInt(draftVelocityWindow.trim(), 10);
+  const parsedVelocityWarn = draftVelocityWarn.trim() === "" ? null : parseDollarInput(draftVelocityWarn);
+  const parsedVelocityHard = draftVelocityHard.trim() === "" ? null : parseDollarInput(draftVelocityHard);
+  const velocityWindowValid = parsedVelocityWindow === null || (Number.isInteger(parsedVelocityWindow) && parsedVelocityWindow >= 1 && parsedVelocityWindow <= 1440);
+
+  const velocitySection = (summary.velocityWindowMinutes != null || summary.velocityCurrentCents != null || onSaveVelocity) ? (
+    <div className={cn("space-y-3", isPlain ? "" : "rounded-xl border border-border/70 bg-background/50 p-3")}>
+      <div className="flex items-center gap-2 text-[11px] uppercase tracking-[0.18em] text-muted-foreground">
+        <Zap className="h-3 w-3" />
+        Spend velocity
+      </div>
+      {summary.velocityCurrentCents != null && summary.velocityWindowMinutes != null && (
+        <div className="flex items-center gap-4 text-sm">
+          <div>
+            <div className="text-[11px] uppercase tracking-[0.18em] text-muted-foreground">Current rate</div>
+            <div className="mt-1 font-semibold tabular-nums">{formatCents(summary.velocityCurrentCents)} / {summary.velocityWindowMinutes}m</div>
+          </div>
+          {summary.velocityHardCents != null && (
+            <div>
+              <div className="text-[11px] uppercase tracking-[0.18em] text-muted-foreground">Hard stop</div>
+              <div className={cn("mt-1 font-semibold tabular-nums", summary.velocityCurrentCents >= summary.velocityHardCents ? "text-red-300" : "")}>
+                {formatCents(summary.velocityHardCents)} / {summary.velocityWindowMinutes}m
+              </div>
+            </div>
+          )}
+          {summary.velocityWarnCents != null && (
+            <div>
+              <div className="text-[11px] uppercase tracking-[0.18em] text-muted-foreground">Warn</div>
+              <div className={cn("mt-1 font-semibold tabular-nums", summary.velocityCurrentCents >= summary.velocityWarnCents ? "text-amber-200" : "")}>
+                {formatCents(summary.velocityWarnCents)} / {summary.velocityWindowMinutes}m
+              </div>
+            </div>
+          )}
+        </div>
+      )}
+      {onSaveVelocity && (
+        <div className="grid gap-3 sm:grid-cols-3">
+          <div>
+            <label className="text-[11px] uppercase tracking-[0.18em] text-muted-foreground">Window (min)</label>
+            <Input
+              value={draftVelocityWindow}
+              onChange={(e) => setDraftVelocityWindow(e.target.value)}
+              className="mt-2"
+              inputMode="numeric"
+              placeholder="e.g. 5"
+            />
+          </div>
+          <div>
+            <label className="text-[11px] uppercase tracking-[0.18em] text-muted-foreground">Warn (USD)</label>
+            <Input
+              value={draftVelocityWarn}
+              onChange={(e) => setDraftVelocityWarn(e.target.value)}
+              className="mt-2"
+              inputMode="decimal"
+              placeholder="0.00"
+            />
+          </div>
+          <div>
+            <label className="text-[11px] uppercase tracking-[0.18em] text-muted-foreground">Hard stop (USD)</label>
+            <Input
+              value={draftVelocityHard}
+              onChange={(e) => setDraftVelocityHard(e.target.value)}
+              className="mt-2"
+              inputMode="decimal"
+              placeholder="0.00"
+            />
+          </div>
+        </div>
+      )}
+      {onSaveVelocity && (
+        <Button
+          size="sm"
+          onClick={() => onSaveVelocity({
+            velocityWindowMinutes: parsedVelocityWindow,
+            velocityWarnCents: parsedVelocityWarn ?? null,
+            velocityHardCents: parsedVelocityHard ?? null,
+          })}
+          disabled={!velocityWindowValid || parsedVelocityWarn === undefined || parsedVelocityHard === undefined || isSaving}
+        >
+          {isSaving ? "Saving..." : "Update velocity policy"}
+        </Button>
+      )}
+    </div>
+  ) : null;
+
   if (isPlain) {
     return (
       <div className="space-y-6">
@@ -181,6 +271,7 @@ export function BudgetPolicyCard({
         {progressSection}
         {pausedPane}
         {saveSection}
+        {velocitySection}
         {parsedDraft === null ? (
           <p className="text-xs text-destructive">Enter a valid non-negative dollar amount.</p>
         ) : null}
@@ -210,6 +301,7 @@ export function BudgetPolicyCard({
         {progressSection}
         {pausedPane}
         {saveSection}
+        {velocitySection}
         {parsedDraft === null ? (
           <p className="text-xs text-destructive">Enter a valid non-negative dollar amount.</p>
         ) : null}

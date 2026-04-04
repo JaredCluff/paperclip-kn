@@ -1191,7 +1191,11 @@ export function routineService(db: Db, deps: { heartbeat?: IssueAssignmentWakeup
     deleteTrigger: async (id: string): Promise<boolean> => {
       const existing = await getTriggerById(id);
       if (!existing) return false;
+      const secretId = existing.secretId;
       await db.delete(routineTriggers).where(eq(routineTriggers.id, id));
+      if (secretId) {
+        await db.delete(companySecrets).where(eq(companySecrets.id, secretId));
+      }
       return true;
     },
 

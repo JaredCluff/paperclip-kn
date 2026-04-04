@@ -3,6 +3,8 @@ import multer from "multer";
 import { z } from "zod";
 import type { Db } from "@paperclipai/db";
 import {
+  ISSUE_STATUSES,
+  ISSUE_ORIGIN_KINDS,
   addIssueCommentSchema,
   createIssueAttachmentMetadataSchema,
   createIssueWorkProductSchema,
@@ -339,8 +341,28 @@ export function issueRoutes(
       return;
     }
 
+    const rawLimit = req.query.limit !== undefined ? parseInt(req.query.limit as string, 10) : NaN;
+    const rawOffset = req.query.offset !== undefined ? parseInt(req.query.offset as string, 10) : NaN;
+    const MAX_ISSUES_LIMIT = 1000;
+    const MAX_ISSUES_OFFSET = 100_000;
+    const limit = !isNaN(rawLimit) && rawLimit > 0 ? Math.min(rawLimit, MAX_ISSUES_LIMIT) : 500;
+    const offset = !isNaN(rawOffset) && rawOffset >= 0 ? Math.min(rawOffset, MAX_ISSUES_OFFSET) : undefined;
+
+    const statusRaw = req.query.status as string | undefined;
+    const originKindRaw = req.query.originKind as string | undefined;
+
+    // Validate enum query params against allowlists to reject junk values early
+    if (statusRaw !== undefined && !(ISSUE_STATUSES as readonly string[]).includes(statusRaw)) {
+      res.status(400).json({ error: `Invalid status: must be one of ${ISSUE_STATUSES.join(", ")}` });
+      return;
+    }
+    if (originKindRaw !== undefined && !(ISSUE_ORIGIN_KINDS as readonly string[]).includes(originKindRaw)) {
+      res.status(400).json({ error: `Invalid originKind: must be one of ${ISSUE_ORIGIN_KINDS.join(", ")}` });
+      return;
+    }
+
     const result = await svc.list(companyId, {
-      status: req.query.status as string | undefined,
+      status: statusRaw,
       assigneeAgentId: req.query.assigneeAgentId as string | undefined,
       participantAgentId: req.query.participantAgentId as string | undefined,
       assigneeUserId,
@@ -351,11 +373,14 @@ export function issueRoutes(
       executionWorkspaceId: req.query.executionWorkspaceId as string | undefined,
       parentId: req.query.parentId as string | undefined,
       labelId: req.query.labelId as string | undefined,
-      originKind: req.query.originKind as string | undefined,
+      originKind: originKindRaw,
       originId: req.query.originId as string | undefined,
       includeRoutineExecutions:
         req.query.includeRoutineExecutions === "true" || req.query.includeRoutineExecutions === "1",
       q: req.query.q as string | undefined,
+      excludeAgentArchived: req.query.excludeAgentArchived === "true",
+      limit,
+      offset,
     });
     res.json(result);
   });
@@ -387,6 +412,7 @@ export function issueRoutes(
   });
 
   router.delete("/labels/:labelId", async (req, res) => {
+    assertBoard(req);
     const labelId = req.params.labelId as string;
     const existing = await svc.getLabelById(labelId);
     if (!existing) {
@@ -935,6 +961,38 @@ export function issueRoutes(
     res.json(removed ?? { ok: true });
   });
 
+  router.delete("/issues/:id/agent-archive", async (req, res) => {
+    const id = req.params.id as string;
+    const issue = await svc.getById(id);
+    if (!issue) {
+      res.status(404).json({ error: "Issue not found" });
+      return;
+    }
+    assertCompanyAccess(req, issue.companyId);
+    if (req.actor.type !== "board") {
+      res.status(403).json({ error: "Board authentication required" });
+      return;
+    }
+    if (!issue.assigneeAgentId) {
+      res.status(400).json({ error: "Issue has no assigned agent" });
+      return;
+    }
+    const removed = await svc.unarchiveAgent(issue.companyId, issue.id, issue.assigneeAgentId);
+    const actor = getActorInfo(req);
+    await logActivity(db, {
+      companyId: issue.companyId,
+      actorType: actor.actorType,
+      actorId: actor.actorId,
+      agentId: actor.agentId,
+      runId: actor.runId,
+      action: "issue.agent_unarchived",
+      entityType: "issue",
+      entityId: issue.id,
+      details: { agentId: issue.assigneeAgentId },
+    });
+    res.json(removed ?? { ok: true });
+  });
+
   router.get("/issues/:id/approvals", async (req, res) => {
     const id = req.params.id as string;
     const issue = await svc.getById(id);
@@ -1324,6 +1382,7 @@ export function issueRoutes(
   });
 
   router.delete("/issues/:id", async (req, res) => {
+    assertBoard(req);
     const id = req.params.id as string;
     const existing = await svc.getById(id);
     if (!existing) {
@@ -2012,8 +2071,10 @@ export function issueRoutes(
     res.setHeader("Content-Type", attachment.contentType || object.contentType || "application/octet-stream");
     res.setHeader("Content-Length", String(attachment.byteSize || object.contentLength || 0));
     res.setHeader("Cache-Control", "private, max-age=60");
-    const filename = attachment.originalFilename ?? "attachment";
-    res.setHeader("Content-Disposition", `inline; filename=\"${filename.replaceAll("\"", "")}\"`);
+    const safeFilename = (attachment.originalFilename ?? "attachment")
+      .replaceAll('"', '')
+      .replaceAll(/[\r\n]/g, '');
+    res.setHeader("Content-Disposition", `inline; filename="${safeFilename}"`);
 
     object.stream.on("error", (err) => {
       next(err);

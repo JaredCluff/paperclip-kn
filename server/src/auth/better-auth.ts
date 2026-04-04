@@ -1,3 +1,4 @@
+import { randomBytes } from "node:crypto";
 import type { Request, RequestHandler } from "express";
 import type { IncomingHttpHeaders } from "node:http";
 import { betterAuth } from "better-auth";
@@ -11,6 +12,7 @@ import {
   authVerifications,
 } from "@paperclipai/db";
 import type { Config } from "../config.js";
+import { logger } from "../middleware/logger.js";
 
 export type BetterAuthSessionUser = {
   id: string;
@@ -67,7 +69,13 @@ export function deriveAuthTrustedOrigins(config: Config): string[] {
 
 export function createBetterAuthInstance(db: Db, config: Config, trustedOrigins?: string[]): BetterAuthInstance {
   const baseUrl = config.authBaseUrlMode === "explicit" ? config.authPublicBaseUrl : undefined;
-  const secret = process.env.BETTER_AUTH_SECRET ?? process.env.PAPERCLIP_AGENT_JWT_SECRET ?? "paperclip-dev-secret";
+  const secret = process.env.BETTER_AUTH_SECRET?.trim();
+  if (!secret) {
+    logger.warn(
+      "BETTER_AUTH_SECRET is not set — sessions will be invalidated on restart. Set BETTER_AUTH_SECRET for persistent sessions."
+    );
+  }
+  const effectiveSecret = secret ?? randomBytes(32).toString("hex");
   const effectiveTrustedOrigins = trustedOrigins ?? deriveAuthTrustedOrigins(config);
 
   const publicUrl = process.env.PAPERCLIP_PUBLIC_URL ?? baseUrl;
@@ -75,7 +83,7 @@ export function createBetterAuthInstance(db: Db, config: Config, trustedOrigins?
 
   const authConfig = {
     baseURL: baseUrl,
-    secret,
+    secret: effectiveSecret,
     trustedOrigins: effectiveTrustedOrigins,
     database: drizzleAdapter(db, {
       provider: "pg",

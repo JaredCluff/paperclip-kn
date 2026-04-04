@@ -182,7 +182,7 @@ export type RoutineRunStatus = (typeof ROUTINE_RUN_STATUSES)[number];
 export const ROUTINE_RUN_SOURCES = ["schedule", "manual", "api", "webhook"] as const;
 export type RoutineRunSource = (typeof ROUTINE_RUN_SOURCES)[number];
 
-export const PAUSE_REASONS = ["manual", "budget", "system"] as const;
+export const PAUSE_REASONS = ["manual", "budget", "budget_velocity", "system"] as const;
 export type PauseReason = (typeof PAUSE_REASONS)[number];
 
 export const PROJECT_COLORS = [
@@ -276,7 +276,7 @@ export type BudgetMetric = (typeof BUDGET_METRICS)[number];
 export const BUDGET_WINDOW_KINDS = ["calendar_month_utc", "lifetime"] as const;
 export type BudgetWindowKind = (typeof BUDGET_WINDOW_KINDS)[number];
 
-export const BUDGET_THRESHOLD_TYPES = ["soft", "hard"] as const;
+export const BUDGET_THRESHOLD_TYPES = ["soft", "hard", "velocity_soft", "velocity_hard_stop"] as const;
 export type BudgetThresholdType = (typeof BUDGET_THRESHOLD_TYPES)[number];
 
 export const BUDGET_INCIDENT_STATUSES = ["open", "resolved", "dismissed"] as const;
@@ -328,9 +328,12 @@ export const LIVE_EVENT_TYPES = [
   "heartbeat.run.log",
   "agent.status",
   "activity.logged",
+  "budget.velocity_threshold_crossed",
   "plugin.ui.updated",
   "plugin.worker.crashed",
   "plugin.worker.restarted",
+  "document.runbook.created",
+  "document.runbook.updated",
 ] as const;
 export type LiveEventType = (typeof LIVE_EVENT_TYPES)[number];
 

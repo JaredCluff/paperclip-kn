@@ -3,6 +3,7 @@ import type { Db } from "@paperclipai/db";
 import { documentRevisions, documents, issueDocuments, issues } from "@paperclipai/db";
 import { issueDocumentKeySchema } from "@paperclipai/shared";
 import { conflict, notFound, unprocessable } from "../errors.js";
+import { publishLiveEvent } from "./live-events.js";
 
 function normalizeDocumentKey(key: string) {
   const normalized = key.trim().toLowerCase();
@@ -469,6 +470,132 @@ export function documentService(db: Db) {
           latestRevisionId: existing.latestRevisionId ?? null,
         };
       });
+    },
+
+    createRunbook: async (input: {
+      companyId: string;
+      title: string;
+      body: string;
+      sourceIssueId: string | null;
+      createdByAgentId: string | null;
+      createdByUserId?: string | null;
+    }) => {
+      const now = new Date();
+      const result = await db.transaction(async (tx) => {
+        const [document] = await tx
+          .insert(documents)
+          .values({
+            companyId: input.companyId,
+            title: input.title,
+            format: "markdown",
+            latestBody: input.body,
+            latestRevisionId: null,
+            latestRevisionNumber: 1,
+            kind: "runbook",
+            sourceIssueId: input.sourceIssueId ?? null,
+            createdByAgentId: input.createdByAgentId ?? null,
+            createdByUserId: input.createdByUserId ?? null,
+            updatedByAgentId: input.createdByAgentId ?? null,
+            updatedByUserId: input.createdByUserId ?? null,
+            createdAt: now,
+            updatedAt: now,
+          })
+          .returning();
+
+        const [revision] = await tx
+          .insert(documentRevisions)
+          .values({
+            companyId: input.companyId,
+            documentId: document.id,
+            revisionNumber: 1,
+            title: input.title,
+            format: "markdown",
+            body: input.body,
+            changeSummary: "Initial runbook",
+            createdByAgentId: input.createdByAgentId ?? null,
+            createdByUserId: input.createdByUserId ?? null,
+            createdByRunId: null,
+            createdAt: now,
+          })
+          .returning();
+
+        const [updated] = await tx
+          .update(documents)
+          .set({ latestRevisionId: revision.id })
+          .where(eq(documents.id, document.id))
+          .returning();
+
+        return updated;
+      });
+
+      publishLiveEvent({
+        companyId: input.companyId,
+        type: "document.runbook.created",
+        payload: { documentId: result.id, sourceIssueId: input.sourceIssueId ?? null, title: input.title } as any,
+      });
+
+      return result;
+    },
+
+    updateRunbookRevision: async (input: {
+      documentId: string;
+      companyId: string;
+      body: string;
+      changeSummary: string;
+      updatedByAgentId: string | null;
+      updatedByUserId?: string | null;
+    }) => {
+      const now = new Date();
+      const existing = await db
+        .select()
+        .from(documents)
+        .where(eq(documents.id, input.documentId))
+        .then((rows) => rows[0] ?? null);
+      if (!existing) throw notFound("Runbook document not found");
+
+      const nextRevisionNumber = existing.latestRevisionNumber + 1;
+
+      const result = await db.transaction(async (tx) => {
+        const [revision] = await tx
+          .insert(documentRevisions)
+          .values({
+            companyId: input.companyId,
+            documentId: input.documentId,
+            revisionNumber: nextRevisionNumber,
+            title: existing.title,
+            format: "markdown",
+            body: input.body,
+            changeSummary: input.changeSummary,
+            createdByAgentId: input.updatedByAgentId ?? null,
+            createdByUserId: input.updatedByUserId ?? null,
+            createdByRunId: null,
+            createdAt: now,
+          })
+          .returning();
+
+        const [updated] = await tx
+          .update(documents)
+          .set({
+            latestBody: input.body,
+            latestRevisionId: revision.id,
+            latestRevisionNumber: nextRevisionNumber,
+            updatedByAgentId: input.updatedByAgentId ?? null,
+            updatedByUserId: input.updatedByUserId ?? null,
+            updatedAt: now,
+          })
+          .where(eq(documents.id, input.documentId))
+          .returning();
+
+        return updated;
+      });
+
+      publishLiveEvent({
+        companyId: input.companyId,
+        type: "document.runbook.updated",
+        payload: { documentId: result.id, sourceIssueId: result.sourceIssueId ?? null, title: result.title ?? "" } as any,
+      });
+
+      return result;
     },
   };
 }

@@ -9,8 +9,8 @@ export const issueComments = pgTable(
   {
     id: uuid("id").primaryKey().defaultRandom(),
     companyId: uuid("company_id").notNull().references(() => companies.id),
-    issueId: uuid("issue_id").notNull().references(() => issues.id),
-    authorAgentId: uuid("author_agent_id").references(() => agents.id),
+    issueId: uuid("issue_id").notNull().references(() => issues.id, { onDelete: "cascade" }),
+    authorAgentId: uuid("author_agent_id").references(() => agents.id, { onDelete: "set null" }),
     authorUserId: text("author_user_id"),
     createdByRunId: uuid("created_by_run_id").references(() => heartbeatRuns.id, { onDelete: "set null" }),
     body: text("body").notNull(),

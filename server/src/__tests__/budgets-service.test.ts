@@ -25,9 +25,11 @@ function createDbStub(selectResults: SelectResult[]) {
 
   const insertValues = vi.fn();
   const insertReturning = vi.fn(async () => pendingInserts.shift() ?? []);
+  const insertOnConflictDoNothing = vi.fn(() => ({ returning: insertReturning }));
   const insert = vi.fn(() => ({
     values: insertValues.mockImplementation(() => ({
       returning: insertReturning,
+      onConflictDoNothing: insertOnConflictDoNothing,
     })),
   }));
 
@@ -42,12 +44,19 @@ function createDbStub(selectResults: SelectResult[]) {
   const pendingInserts: unknown[][] = [];
   const pendingUpdates: unknown[][] = [];
 
+  // transaction() passes the same stub as the tx object so mocked selects/inserts/updates
+  // are shared between the outer db and any transaction callback.
+  const transaction = vi.fn(async (cb: (tx: unknown) => Promise<unknown>) => cb(db));
+
+  const db = {
+    select,
+    insert,
+    update,
+    transaction,
+  };
+
   return {
-    db: {
-      select,
-      insert,
-      update,
-    },
+    db,
     queueInsert: (rows: unknown[]) => {
       pendingInserts.push(rows);
     },
@@ -83,13 +92,13 @@ describe("budgetService", () => {
     const dbStub = createDbStub([
       [policy],
       [{ total: 150 }],
-      [],
       [{
         companyId: "company-1",
         name: "Budget Agent",
         status: "running",
         pauseReason: null,
       }],
+      [],
     ]);
 
     dbStub.queueInsert([{
@@ -307,5 +316,117 @@ describe("budgetService", () => {
         updatedAt: expect.any(Date),
       }),
     );
+  });
+
+  it("creates a velocity_hard_stop incident and pauses an agent when spend velocity exceeds the hard threshold", async () => {
+    const policy = {
+      id: "policy-1",
+      companyId: "company-1",
+      scopeType: "agent",
+      scopeId: "agent-1",
+      metric: "billed_cents",
+      windowKind: "calendar_month_utc",
+      amount: 10000,
+      warnPercent: 80,
+      hardStopEnabled: true,
+      notifyEnabled: false,
+      isActive: true,
+      velocityWindowMinutes: 5,
+      velocityWarnCents: null,
+      velocityHardCents: 50,
+    };
+
+    const dbStub = createDbStub([
+      [policy],
+      [{ total: 500 }],
+      [{ total: 75 }],
+      [{
+        companyId: "company-1",
+        name: "Velocity Agent",
+        status: "running",
+        pauseReason: null,
+      }],
+      [],
+    ]);
+
+    dbStub.queueInsert([{
+      id: "approval-v1",
+      companyId: "company-1",
+      status: "pending",
+    }]);
+    dbStub.queueInsert([{
+      id: "incident-v1",
+      companyId: "company-1",
+      policyId: "policy-1",
+      approvalId: "approval-v1",
+    }]);
+    dbStub.queueUpdate([]);
+
+    const cancelWorkForScope = vi.fn().mockResolvedValue(undefined);
+    const service = budgetService(dbStub.db as any, { cancelWorkForScope });
+    await service.evaluateCostEvent({
+      companyId: "company-1",
+      agentId: "agent-1",
+      projectId: null,
+    } as any);
+
+    expect(dbStub.insertValues).toHaveBeenCalledWith(
+      expect.objectContaining({
+        companyId: "company-1",
+        type: "budget_override_required",
+        status: "pending",
+      }),
+    );
+    expect(dbStub.insertValues).toHaveBeenCalledWith(
+      expect.objectContaining({
+        thresholdType: "velocity_hard_stop",
+        amountObserved: 75,
+        approvalId: "approval-v1",
+      }),
+    );
+    expect(dbStub.updateSet).toHaveBeenCalledWith(
+      expect.objectContaining({
+        status: "paused",
+        pauseReason: "budget_velocity",
+        pausedAt: expect.any(Date),
+      }),
+    );
+    expect(cancelWorkForScope).toHaveBeenCalledWith({
+      companyId: "company-1",
+      scopeType: "agent",
+      scopeId: "agent-1",
+    });
+    expect(mockLogActivity).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({
+        action: "budget.velocity_threshold_crossed",
+        entityId: "incident-v1",
+      }),
+    );
+  });
+
+  it("blocks new work when an agent is paused due to budget_velocity", async () => {
+    const dbStub = createDbStub([
+      [{
+        status: "paused",
+        pauseReason: "budget_velocity",
+        companyId: "company-1",
+        name: "Velocity Agent",
+      }],
+      [{
+        status: "active",
+        name: "Paperclip",
+      }],
+    ]);
+
+    const service = budgetService(dbStub.db as any);
+    const block = await service.getInvocationBlock("company-1", "agent-1");
+
+    expect(block).toEqual({
+      scopeType: "agent",
+      scopeId: "agent-1",
+      scopeName: "Velocity Agent",
+      reason: "Agent is paused because its budget spend velocity hard-stop was reached.",
+    });
   });
 });

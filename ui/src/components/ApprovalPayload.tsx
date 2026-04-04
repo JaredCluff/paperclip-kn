@@ -110,18 +110,38 @@ export function CeoStrategyPayload({ payload }: { payload: Record<string, unknow
 export function BudgetOverridePayload({ payload }: { payload: Record<string, unknown> }) {
   const budgetAmount = typeof payload.budgetAmount === "number" ? payload.budgetAmount : null;
   const observedAmount = typeof payload.observedAmount === "number" ? payload.observedAmount : null;
+  const isVelocity = payload.thresholdType === "velocity_hard_stop" || payload.thresholdType === "velocity_soft";
+  const velocityWindow = typeof payload.velocityWindowMinutes === "number" ? payload.velocityWindowMinutes : null;
   return (
     <div className="mt-3 space-y-1.5 text-sm">
       <PayloadField label="Scope" value={payload.scopeName ?? payload.scopeType} />
-      <PayloadField label="Window" value={payload.windowKind} />
-      <PayloadField label="Metric" value={payload.metric} />
-      {(budgetAmount !== null || observedAmount !== null) ? (
-        <div className="rounded-md bg-muted/40 px-3 py-2 text-xs text-muted-foreground">
-          Limit {budgetAmount !== null ? formatCents(budgetAmount) : "—"} · Observed {observedAmount !== null ? formatCents(observedAmount) : "—"}
-        </div>
-      ) : null}
-      {!!payload.guidance && (
-        <p className="text-muted-foreground">{String(payload.guidance)}</p>
+      {isVelocity ? (
+        <>
+          <PayloadField label="Type" value={`Velocity ${payload.thresholdType === "velocity_hard_stop" ? "hard stop" : "warning"}`} />
+          {velocityWindow != null && (
+            <PayloadField label="Window" value={`${velocityWindow} min`} />
+          )}
+          {observedAmount !== null && (
+            <div className="rounded-md bg-muted/40 px-3 py-2 text-xs text-muted-foreground">
+              Velocity observed: {formatCents(observedAmount)}{velocityWindow != null ? ` / ${velocityWindow}m` : ""}
+              {budgetAmount !== null ? ` · Limit: ${formatCents(budgetAmount)}${velocityWindow != null ? ` / ${velocityWindow}m` : ""}` : ""}
+            </div>
+          )}
+          <p className="text-muted-foreground">Review the agent&apos;s spend velocity and resume the scope, or keep it paused.</p>
+        </>
+      ) : (
+        <>
+          <PayloadField label="Window" value={payload.windowKind} />
+          <PayloadField label="Metric" value={payload.metric} />
+          {(budgetAmount !== null || observedAmount !== null) ? (
+            <div className="rounded-md bg-muted/40 px-3 py-2 text-xs text-muted-foreground">
+              Limit {budgetAmount !== null ? formatCents(budgetAmount) : "—"} · Observed {observedAmount !== null ? formatCents(observedAmount) : "—"}
+            </div>
+          ) : null}
+          {!!payload.guidance && (
+            <p className="text-muted-foreground">{String(payload.guidance)}</p>
+          )}
+        </>
       )}
     </div>
   );

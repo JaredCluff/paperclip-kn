@@ -64,14 +64,12 @@ export function actorMiddleware(db: Db, opts: ActorMiddlewareOptions): RequestHa
             userId,
             companyIds: memberships.map((row) => row.companyId),
             isInstanceAdmin: Boolean(roleRow),
-            runId: runIdHeader ?? undefined,
             source: "session",
           };
           next();
           return;
         }
       }
-      if (runIdHeader) req.actor.runId = runIdHeader;
       next();
       return;
     }
@@ -93,7 +91,6 @@ export function actorMiddleware(db: Db, opts: ActorMiddlewareOptions): RequestHa
           companyIds: access.companyIds,
           isInstanceAdmin: access.isInstanceAdmin,
           keyId: boardKey.id,
-          runId: runIdHeader || undefined,
           source: "board_key",
         };
         next();
@@ -136,7 +133,7 @@ export function actorMiddleware(db: Db, opts: ActorMiddlewareOptions): RequestHa
         agentId: claims.sub,
         companyId: claims.company_id,
         keyId: undefined,
-        runId: runIdHeader || claims.run_id || undefined,
+        runId: claims.run_id || undefined,
         source: "agent_jwt",
       };
       next();
@@ -164,7 +161,6 @@ export function actorMiddleware(db: Db, opts: ActorMiddlewareOptions): RequestHa
       agentId: key.agentId,
       companyId: key.companyId,
       keyId: key.id,
-      runId: runIdHeader || undefined,
       source: "agent_key",
     };
 

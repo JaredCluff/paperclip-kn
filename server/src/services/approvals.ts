@@ -7,6 +7,7 @@ import { agentService } from "./agents.js";
 import { budgetService } from "./budgets.js";
 import { notifyHireApproved } from "./hire-hook.js";
 import { instanceSettingsService } from "./instance-settings.js";
+import { logger } from "../middleware/logger.js";
 
 export function approvalService(db: Db) {
   const agentsSvc = agentService(db);
@@ -161,7 +162,9 @@ export function approvalService(db: Db) {
             source: "approval",
             sourceId: id,
             approvedAt: now,
-          }).catch(() => {});
+          }).catch((err) => {
+            logger.warn({ err }, "hire approval notification failed");
+          });
         }
       }
 

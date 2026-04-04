@@ -344,6 +344,69 @@
       "when": 1775145655557,
       "tag": "0048_flashy_marrow",
       "breakpoints": true
+    },
+    {
+      "idx": 49,
+      "version": "7",
+      "when": 1775135304000,
+      "tag": "0049_budget_velocity_columns",
+      "breakpoints": true
+    },
+    {
+      "idx": 50,
+      "version": "7",
+      "when": 1775221704000,
+      "tag": "0050_issue_agent_archives",
+      "breakpoints": true
+    },
+    {
+      "idx": 51,
+      "version": "7",
+      "when": 1775221800000,
+      "tag": "0051_performance_indexes",
+      "breakpoints": true
+    },
+    {
+      "idx": 52,
+      "version": "7",
+      "when": 1775308200000,
+      "tag": "0052_auth_session_indexes",
+      "breakpoints": true
+    },
+    {
+      "idx": 53,
+      "version": "7",
+      "when": 1775394600000,
+      "tag": "0053_agent_api_key_hash_unique",
+      "breakpoints": true
+    },
+    {
+      "idx": 54,
+      "version": "7",
+      "when": 1775481000000,
+      "tag": "0054_documents_latest_revision_fk",
+      "breakpoints": true
+    },
+    {
+      "idx": 55,
+      "version": "7",
+      "when": 1775567400000,
+      "tag": "0055_cascade_deletes",
+      "breakpoints": true
+    },
+    {
+      "idx": 56,
+      "version": "7",
+      "when": 1775653800000,
+      "tag": "0056_schema_integrity",
+      "breakpoints": true
+    },
+    {
+      "idx": 57,
+      "version": "7",
+      "when": 1775740200000,
+      "tag": "0057_ticket_lifecycle",
+      "breakpoints": true
     }
   ]
 }

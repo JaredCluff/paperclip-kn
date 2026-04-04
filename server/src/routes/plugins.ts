@@ -314,6 +314,23 @@ export function pluginRoutes(
     workerManager: bridgeDeps?.workerManager ?? webhookDeps?.workerManager,
   });
 
+  // Simple in-memory rate limiter for webhook ingestion: max 60 req/min per plugin
+  const webhookRateLimiter = new Map<string, { count: number; windowStart: number }>();
+  const WEBHOOK_MAX_PER_MIN = 60;
+  const WEBHOOK_WINDOW_MS = 60_000;
+
+  function checkWebhookRateLimit(pluginId: string): boolean {
+    const now = Date.now();
+    const entry = webhookRateLimiter.get(pluginId);
+    if (!entry || now - entry.windowStart >= WEBHOOK_WINDOW_MS) {
+      webhookRateLimiter.set(pluginId, { count: 1, windowStart: now });
+      return true;
+    }
+    if (entry.count >= WEBHOOK_MAX_PER_MIN) return false;
+    entry.count++;
+    return true;
+  }
+
   async function resolvePluginAuditCompanyIds(req: Request): Promise<string[]> {
     if (typeof (db as { select?: unknown }).select === "function") {
       const rows = await db
@@ -1899,6 +1916,11 @@ export function pluginRoutes(
     }
 
     const { pluginId, endpointKey } = req.params;
+
+    if (!checkWebhookRateLimit(pluginId)) {
+      res.status(429).json({ error: "Too many webhook requests" });
+      return;
+    }
 
     // Step 1: Resolve the plugin
     const plugin = await resolvePlugin(registry, pluginId);

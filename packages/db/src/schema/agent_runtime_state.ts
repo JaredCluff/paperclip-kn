@@ -5,7 +5,7 @@ import { companies } from "./companies.js";
 export const agentRuntimeState = pgTable(
   "agent_runtime_state",
   {
-    agentId: uuid("agent_id").primaryKey().references(() => agents.id),
+    agentId: uuid("agent_id").primaryKey().references(() => agents.id, { onDelete: "cascade" }),
     companyId: uuid("company_id").notNull().references(() => companies.id),
     adapterType: text("adapter_type").notNull(),
     sessionId: text("session_id"),

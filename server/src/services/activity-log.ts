@@ -89,6 +89,8 @@ export async function logActivity(db: Db, input: LogActivityInput) {
       for (const { pluginId, error } of errors) {
         logger.warn({ pluginId, eventType: event.eventType, err: error }, "plugin event handler failed");
       }
-    }).catch(() => {});
+    }).catch((err) => {
+      logger.warn({ err }, "plugin event bus emission failed");
+    });
   }
 }

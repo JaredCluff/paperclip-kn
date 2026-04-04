@@ -261,12 +261,17 @@ export function agentService(db: Db) {
   async function assertNoCycle(agentId: string, reportsTo: string | null | undefined) {
     if (!reportsTo) return;
     if (reportsTo === agentId) throw unprocessable("Agent cannot report to itself");
-
+    const visited = new Set<string>([agentId]);
     let cursor: string | null = reportsTo;
     while (cursor) {
-      if (cursor === agentId) throw unprocessable("Reporting relationship would create cycle");
-      const next = await getById(cursor);
-      cursor = next?.reportsTo ?? null;
+      if (visited.has(cursor)) throw unprocessable("Reporting relationship would create cycle");
+      visited.add(cursor);
+      const row = await db
+        .select({ reportsTo: agents.reportsTo })
+        .from(agents)
+        .where(eq(agents.id, cursor))
+        .then((rows) => rows[0] ?? null);
+      cursor = row?.reportsTo ?? null;
     }
   }
 
@@ -278,17 +283,23 @@ export function agentService(db: Db) {
     const candidateShortname = normalizeAgentUrlKey(candidateName);
     if (!candidateShortname) return;
 
-    const existingAgents = await db
-      .select({
-        id: agents.id,
-        name: agents.name,
-        status: agents.status,
-      })
-      .from(agents)
-      .where(eq(agents.companyId, companyId));
+    const conditions = [
+      eq(agents.companyId, companyId),
+      sql`regexp_replace(regexp_replace(lower(trim(${agents.name})), '[^a-z0-9]+', '-', 'g'), '^-+|-+$', '', 'g') = ${candidateShortname}`,
+      ne(agents.status, "terminated"),
+    ];
+    if (options?.excludeAgentId) {
+      conditions.push(ne(agents.id, options.excludeAgentId));
+    }
 
-    const hasCollision = hasAgentShortnameCollision(candidateName, existingAgents, options);
-    if (hasCollision) {
+    const existing = await db
+      .select({ id: agents.id })
+      .from(agents)
+      .where(and(...conditions))
+      .limit(1)
+      .then((rows) => rows[0] ?? null);
+
+    if (existing) {
       throw conflict(
         `Agent shortname '${candidateShortname}' is already in use in this company`,
       );
@@ -450,20 +461,22 @@ export function agentService(db: Db) {
       const existing = await getById(id);
       if (!existing) return null;
 
-      await db
-        .update(agents)
-        .set({
-          status: "terminated",
-          pauseReason: null,
-          pausedAt: null,
-          updatedAt: new Date(),
-        })
-        .where(eq(agents.id, id));
+      await db.transaction(async (tx) => {
+        await tx
+          .update(agents)
+          .set({
+            status: "terminated",
+            pauseReason: null,
+            pausedAt: null,
+            updatedAt: new Date(),
+          })
+          .where(eq(agents.id, id));
 
-      await db
-        .update(agentApiKeys)
-        .set({ revokedAt: new Date() })
-        .where(eq(agentApiKeys.agentId, id));
+        await tx
+          .update(agentApiKeys)
+          .set({ revokedAt: new Date() })
+          .where(eq(agentApiKeys.agentId, id));
+      });
 
       return getById(id);
     },
@@ -526,7 +539,8 @@ export function agentService(db: Db) {
         .select()
         .from(agentConfigRevisions)
         .where(eq(agentConfigRevisions.agentId, id))
-        .orderBy(desc(agentConfigRevisions.createdAt)),
+        .orderBy(desc(agentConfigRevisions.createdAt))
+        .limit(100),
 
     getConfigRevision: async (id: string, revisionId: string) =>
       db
@@ -601,7 +615,8 @@ export function agentService(db: Db) {
           revokedAt: agentApiKeys.revokedAt,
         })
         .from(agentApiKeys)
-        .where(eq(agentApiKeys.agentId, id)),
+        .where(eq(agentApiKeys.agentId, id))
+        .limit(50),
 
     revokeKey: async (keyId: string) => {
       const rows = await db
@@ -614,12 +629,17 @@ export function agentService(db: Db) {
 
     orgForCompany: async (companyId: string) => {
       const rows = await db
-        .select()
+        .select({
+          id: agents.id,
+          name: agents.name,
+          role: agents.role,
+          status: agents.status,
+          reportsTo: agents.reportsTo,
+        })
         .from(agents)
         .where(and(eq(agents.companyId, companyId), ne(agents.status, "terminated")));
-      const normalizedRows = rows.map(normalizeAgentRow);
-      const byManager = new Map<string | null, typeof normalizedRows>();
-      for (const row of normalizedRows) {
+      const byManager = new Map<string | null, typeof rows>();
+      for (const row of rows) {
         const key = row.reportsTo ?? null;
         const group = byManager.get(key) ?? [];
         group.push(row);
@@ -677,10 +697,18 @@ export function agentService(db: Db) {
         return { agent: null, ambiguous: false } as const;
       }
 
-      const rows = await db.select().from(agents).where(eq(agents.companyId, companyId));
-      const matches = rows
-        .map(normalizeAgentRow)
-        .filter((agent) => agent.urlKey === urlKey && agent.status !== "terminated");
+      const matchRows = await db
+        .select()
+        .from(agents)
+        .where(
+          and(
+            eq(agents.companyId, companyId),
+            ne(agents.status, "terminated"),
+            sql`regexp_replace(regexp_replace(lower(trim(${agents.name})), '[^a-z0-9]+', '-', 'g'), '^-+|-+$', '', 'g') = ${urlKey}`,
+          ),
+        )
+        .limit(2);
+      const matches = matchRows.map(normalizeAgentRow);
       if (matches.length === 1) {
         return { agent: matches[0] ?? null, ambiguous: false } as const;
       }

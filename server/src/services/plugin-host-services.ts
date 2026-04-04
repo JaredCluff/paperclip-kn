@@ -235,7 +235,7 @@ async function executePinnedHttpRequest(
     req.end();
   });
 
-  const MAX_RESPONSE_BODY_BYTES = 200 * 1024 * 1024; // 200 MB
+  const MAX_RESPONSE_BODY_BYTES = 50 * 1024 * 1024; // 50 MB
   const chunks: Buffer[] = [];
   let totalBytes = 0;
   await new Promise<void>((resolve, reject) => {
@@ -775,7 +775,11 @@ export function buildHostServices(
       async list(params) {
         const companyId = ensureCompanyId(params.companyId);
         await ensurePluginAvailableForCompany(companyId);
-        return applyWindow((await issues.list(companyId, params as any)) as Issue[], params);
+        const filters = {
+          ...params,
+          status: params.status ?? "backlog,todo,in_progress,in_review,blocked",
+        };
+        return applyWindow((await issues.list(companyId, filters as any)) as Issue[], params);
       },
       async get(params) {
         const companyId = ensureCompanyId(params.companyId);

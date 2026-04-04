@@ -42,6 +42,16 @@ export function costRoutes(db: Db) {
       return;
     }
 
+    // Board actors must submit costs only for agents that belong to this company
+    // (prevents cross-company IDOR where a board user forges an agentId from another company)
+    if (req.actor.type === "board" && req.body.agentId) {
+      const targetAgent = await agents.getById(req.body.agentId);
+      if (!targetAgent || targetAgent.companyId !== companyId) {
+        res.status(403).json({ error: "Agent does not belong to this company" });
+        return;
+      }
+    }
+
     const event = await costs.createEvent(companyId, {
       ...req.body,
       occurredAt: new Date(req.body.occurredAt),
@@ -282,6 +292,7 @@ export function costRoutes(db: Db) {
   });
 
   router.patch("/agents/:agentId/budgets", validate(updateBudgetSchema), async (req, res) => {
+    assertBoard(req);
     const agentId = req.params.agentId as string;
     const agent = await agents.getById(agentId);
     if (!agent) {
@@ -290,13 +301,6 @@ export function costRoutes(db: Db) {
     }
 
     assertCompanyAccess(req, agent.companyId);
-
-    if (req.actor.type === "agent") {
-      if (req.actor.agentId !== agentId) {
-        res.status(403).json({ error: "Agent can only change its own budget" });
-        return;
-      }
-    }
 
     const updated = await agents.update(agentId, { budgetMonthlyCents: req.body.budgetMonthlyCents });
     if (!updated) {

@@ -28,6 +28,7 @@ import type {
 } from "@paperclipai/shared";
 import { normalizeAgentUrlKey } from "@paperclipai/shared";
 import { findServerAdapter } from "../adapters/index.js";
+import { assertNotSsrfTarget } from "../adapters/ssrf.js";
 import { resolvePaperclipInstanceRoot } from "../home-paths.js";
 import { notFound, unprocessable } from "../errors.js";
 import { ghFetch, gitHubApiBase, resolveRawGitHubUrl } from "./github-fetch.js";
@@ -1087,6 +1088,7 @@ async function readUrlSkillImports(
   }
 
   if (url.startsWith("http://") || url.startsWith("https://")) {
+    await assertNotSsrfTarget(url);
     const markdown = await fetchText(url);
     const parsedMarkdown = parseFrontmatterMarkdown(markdown);
     const urlObj = new URL(url);
@@ -1778,6 +1780,11 @@ export function companySkillService(db: Db) {
     const normalizedPath = normalizePortablePath(relativePath);
     const absolutePath = resolveLocalSkillFilePath(skill, normalizedPath);
     if (!absolutePath) throw notFound("Skill file not found");
+
+    // Ensure the target path exists in the inventory before writing — prevents
+    // creating new files outside the declared inventory (e.g. .env, scripts).
+    const fileEntry = skill.fileInventory.find((entry) => entry.path === normalizedPath);
+    if (!fileEntry) throw notFound("Skill file not found");
 
     await fs.mkdir(path.dirname(absolutePath), { recursive: true });
     await fs.writeFile(absolutePath, content, "utf8");

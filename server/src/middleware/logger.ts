@@ -43,6 +43,17 @@ export const logger = pino({
   ],
 }));
 
+function sanitizeBody(body: unknown): unknown {
+  if (!body || typeof body !== "object") return body;
+  const SENSITIVE = new Set(["password", "token", "secret", "key", "authorization", "credential", "apikey", "api_key"]);
+  return Object.fromEntries(
+    Object.entries(body as Record<string, unknown>).map(([k, v]) => [
+      k,
+      SENSITIVE.has(k.toLowerCase()) ? "[REDACTED]" : v,
+    ]),
+  );
+}
+
 export const httpLogger = pinoHttp({
   logger,
   customLogLevel(_req, res, err) {
@@ -64,7 +75,7 @@ export const httpLogger = pinoHttp({
       if (ctx) {
         return {
           errorContext: ctx.error,
-          reqBody: ctx.reqBody,
+          reqBody: sanitizeBody(ctx.reqBody),
           reqParams: ctx.reqParams,
           reqQuery: ctx.reqQuery,
         };
@@ -72,7 +83,7 @@ export const httpLogger = pinoHttp({
       const props: Record<string, unknown> = {};
       const { body, params, query } = req as any;
       if (body && typeof body === "object" && Object.keys(body).length > 0) {
-        props.reqBody = body;
+        props.reqBody = sanitizeBody(body);
       }
       if (params && typeof params === "object" && Object.keys(params).length > 0) {
         props.reqParams = params;

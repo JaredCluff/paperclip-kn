@@ -498,6 +498,14 @@ export function createPluginWorkerHandle(
       return;
     }
 
+    // Basic params type safety: handlers expect Record<string, unknown>
+    const params = request.params;
+    if (params !== undefined && params !== null && (typeof params !== 'object' || Array.isArray(params))) {
+      const errorResponse = { jsonrpc: "2.0", id: request.id, error: { code: -32600, message: "Invalid params" } };
+      process.send?.(errorResponse);
+      return;
+    }
+
     try {
       const result = await handler(request.params);
       sendMessage({
@@ -616,9 +624,10 @@ export function createPluginWorkerHandle(
       TZ: process.env.TZ ?? "UTC",
     };
 
+    const workerMemoryMb = Number(process.env.PLUGIN_WORKER_MAX_MEMORY_MB ?? "512");
     const child = fork(options.entrypointPath, [], {
       stdio: ["pipe", "pipe", "pipe", "ipc"],
-      execArgv: options.execArgv ?? [],
+      execArgv: [`--max-old-space-size=${workerMemoryMb}`, ...(options.execArgv ?? [])],
       env: workerEnv,
       // Don't let the child keep the parent alive
       detached: false,
@@ -639,7 +648,9 @@ export function createPluginWorkerHandle(
       stderrReadline = createInterface({ input: child.stderr });
       stderrReadline.on("line", (line: string) => {
         stderrExcerpt = appendStderrExcerpt(stderrExcerpt, line);
-        log.warn({ stream: "stderr" }, `[plugin stderr] ${line}`);
+        // Cap individual line length to prevent log flooding from malicious workers
+        const safeLine = line.length > 1000 ? `${line.slice(0, 1000)}…[truncated]` : line;
+        log.warn({ stream: "stderr" }, `[plugin stderr] ${safeLine}`);
       });
     }
 
@@ -741,6 +752,8 @@ export function createPluginWorkerHandle(
         { consecutiveCrashes, maxCrashes: MAX_CONSECUTIVE_CRASHES },
         "max consecutive crashes reached, not restarting",
       );
+      log.error({ pluginId }, "Plugin exceeded max restart attempts — marking as failed");
+      setStatus("crashed");
     }
   }
 

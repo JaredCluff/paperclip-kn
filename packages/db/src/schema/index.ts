@@ -32,6 +32,7 @@ export { issueLabels } from "./issue_labels.js";
 export { issueApprovals } from "./issue_approvals.js";
 export { issueComments } from "./issue_comments.js";
 export { issueInboxArchives } from "./issue_inbox_archives.js";
+export { issueAgentArchives } from "./issue_agent_archives.js";
 export { feedbackVotes } from "./feedback_votes.js";
 export { feedbackExports } from "./feedback_exports.js";
 export { issueReadStates } from "./issue_read_states.js";

@@ -11,6 +11,7 @@ import {
   heartbeatRuns,
   executionWorkspaces,
   issueAttachments,
+  issueAgentArchives,
   issueInboxArchives,
   issueLabels,
   issueComments,
@@ -22,7 +23,7 @@ import {
   projects,
 } from "@paperclipai/db";
 import { extractAgentMentionIds, extractProjectMentionIds, isUuidLike } from "@paperclipai/shared";
-import { conflict, notFound, unprocessable } from "../errors.js";
+import { badRequest, conflict, notFound, unprocessable } from "../errors.js";
 import {
   defaultIssueExecutionWorkspaceSettingsForProject,
   gateProjectExecutionWorkspacePolicy,
@@ -33,6 +34,7 @@ import { instanceSettingsService } from "./instance-settings.js";
 import { redactCurrentUserText } from "../log-redaction.js";
 import { resolveIssueGoalId, resolveNextIssueGoalId } from "./issue-goal-fallback.js";
 import { getDefaultCompanyGoal } from "./goals.js";
+import { enqueueRunbookReview, type RunbookReviewSnapshot } from "./runbook-review.js";
 
 const ALL_ISSUE_STATUSES = ["backlog", "todo", "in_progress", "in_review", "blocked", "done", "cancelled"];
 const MAX_ISSUE_COMMENT_PAGE_LIMIT = 500;
@@ -69,6 +71,7 @@ export interface IssueFilters {
   assigneeUserId?: string;
   touchedByUserId?: string;
   inboxArchivedByUserId?: string;
+  excludeAgentArchived?: boolean;
   unreadForUserId?: string;
   projectId?: string;
   executionWorkspaceId?: string;
@@ -78,6 +81,8 @@ export interface IssueFilters {
   originId?: string;
   includeRoutineExecutions?: boolean;
   q?: string;
+  limit?: number;
+  offset?: number;
 }
 
 type IssueRow = typeof issues.$inferSelect;
@@ -749,7 +754,8 @@ export function issueService(db: Db) {
             AND ${issueComments.body} ILIKE ${containsPattern} ESCAPE '\\'
         )
       `;
-      if (filters?.status) {
+      // "all" is a sentinel used by agent-facing tooling to bypass status filtering
+      if (filters?.status && filters.status !== "all") {
         const statuses = filters.status.split(",").map((s) => s.trim());
         conditions.push(statuses.length === 1 ? eq(issues.status, statuses[0]) : inArray(issues.status, statuses));
       }
@@ -767,6 +773,15 @@ export function issueService(db: Db) {
       }
       if (inboxArchivedByUserId) {
         conditions.push(inboxVisibleForUserCondition(companyId, inboxArchivedByUserId));
+      }
+      if (filters?.excludeAgentArchived) {
+        conditions.push(
+          sql<boolean>`NOT EXISTS (
+            SELECT 1 FROM ${issueAgentArchives}
+            WHERE ${issueAgentArchives.issueId} = ${issues.id}
+              AND ${issueAgentArchives.agentId} = ${issues.assigneeAgentId}
+          )`,
+        );
       }
       if (unreadForUserId) {
         conditions.push(unreadForUserCondition(companyId, unreadForUserId));
@@ -814,7 +829,7 @@ export function issueService(db: Db) {
         END
       `;
       const canonicalLastActivityAt = issueCanonicalLastActivityAtExpr(companyId);
-      const rows = await db
+      let listQuery = db
         .select()
         .from(issues)
         .where(and(...conditions))
@@ -823,7 +838,11 @@ export function issueService(db: Db) {
           asc(priorityOrder),
           desc(canonicalLastActivityAt),
           desc(issues.updatedAt),
-        );
+        )
+        .$dynamic();
+      if (filters?.limit) listQuery = listQuery.limit(filters.limit);
+      if (filters?.offset) listQuery = listQuery.offset(filters.offset);
+      const rows = await listQuery;
       const withLabels = await withIssueLabels(db, rows);
       const runMap = await activeRunMapForIssues(db, withLabels);
       const withRuns = withActiveRuns(withLabels, runMap);
@@ -1061,6 +1080,65 @@ export function issueService(db: Db) {
       return row ?? null;
     },
 
+    sweepAgentArchives: async (): Promise<{ archived: number }> => {
+      const cutoff = new Date(Date.now() - 24 * 60 * 60 * 1000);
+      const eligible = await db
+        .select({
+          id: issues.id,
+          companyId: issues.companyId,
+          assigneeAgentId: issues.assigneeAgentId,
+        })
+        .from(issues)
+        .where(
+          and(
+            inArray(issues.status, ["done", "cancelled"]),
+            sql<boolean>`${issues.assigneeAgentId} IS NOT NULL`,
+            sql<boolean>`(
+              (${issues.completedAt} IS NOT NULL AND ${issues.completedAt} < ${cutoff})
+              OR (${issues.cancelledAt} IS NOT NULL AND ${issues.cancelledAt} < ${cutoff})
+            )`,
+            sql<boolean>`NOT EXISTS (
+              SELECT 1 FROM ${issueAgentArchives}
+              WHERE ${issueAgentArchives.issueId} = ${issues.id}
+                AND ${issueAgentArchives.agentId} = ${issues.assigneeAgentId}
+            )`,
+          ),
+        )
+        .limit(500);
+
+      if (eligible.length === 0) return { archived: 0 };
+
+      const now = new Date();
+      await db
+        .insert(issueAgentArchives)
+        .values(
+          eligible.map((row) => ({
+            companyId: row.companyId,
+            issueId: row.id,
+            agentId: row.assigneeAgentId!,
+            archivedAt: now,
+            updatedAt: now,
+          })),
+        )
+        .onConflictDoNothing();
+
+      return { archived: eligible.length };
+    },
+
+    unarchiveAgent: async (companyId: string, issueId: string, agentId: string) => {
+      const [row] = await db
+        .delete(issueAgentArchives)
+        .where(
+          and(
+            eq(issueAgentArchives.companyId, companyId),
+            eq(issueAgentArchives.issueId, issueId),
+            eq(issueAgentArchives.agentId, agentId),
+          ),
+        )
+        .returning();
+      return row ?? null;
+    },
+
     getById: async (raw: string) => {
       const id = raw.trim();
       if (/^[A-Z]+-\d+$/i.test(id)) {
@@ -1219,6 +1297,17 @@ export function issueService(db: Db) {
           values.cancelledAt = new Date();
         }
 
+        if (values.parentId) {
+          const [parent] = await tx
+            .select({ id: issues.id })
+            .from(issues)
+            .where(and(eq(issues.id, values.parentId), eq(issues.companyId, companyId)))
+            .limit(1);
+          if (!parent) {
+            throw notFound("Parent issue not found");
+          }
+        }
+
         const [issue] = await tx.insert(issues).values(values).returning();
         if (inputLabelIds) {
           await syncIssueLabels(issue.id, companyId, inputLabelIds, tx);
@@ -1237,6 +1326,15 @@ export function issueService(db: Db) {
       if (!existing) return null;
 
       const { labelIds: nextLabelIds, ...issueData } = data;
+
+      const isClosing = issueData.status === "done" || issueData.status === "cancelled";
+      if (isClosing) {
+        const effectiveNotes = (issueData.resolutionNotes ?? existing.resolutionNotes ?? "").trim();
+        if (!effectiveNotes) {
+          throw badRequest("Resolution notes are required when closing or cancelling an issue.");
+        }
+      }
+
       const isolatedWorkspacesEnabled = (await instanceSettings.getExperimental()).enableIsolatedWorkspaces;
       if (!isolatedWorkspacesEnabled) {
         delete issueData.executionWorkspaceId;
@@ -1299,7 +1397,18 @@ export function issueService(db: Db) {
         patch.checkoutRunId = null;
       }
 
-      return db.transaction(async (tx) => {
+      if (issueData.parentId) {
+        const [parent] = await db
+          .select({ id: issues.id })
+          .from(issues)
+          .where(and(eq(issues.id, issueData.parentId), eq(issues.companyId, existing.companyId)))
+          .limit(1);
+        if (!parent) {
+          throw notFound("Parent issue not found");
+        }
+      }
+
+      const result = await db.transaction(async (tx) => {
         const defaultCompanyGoal = await getDefaultCompanyGoal(tx, existing.companyId);
         const [currentProjectGoalId, nextProjectGoalId] = await Promise.all([
           getProjectDefaultGoalId(tx, existing.companyId, existing.projectId),
@@ -1325,12 +1434,65 @@ export function issueService(db: Db) {
           .returning()
           .then((rows) => rows[0] ?? null);
         if (!updated) return null;
+        // If re-opening a terminal issue, clear the agent archive record
+        if (
+          issueData.status &&
+          issueData.status !== "done" &&
+          issueData.status !== "cancelled" &&
+          (existing.status === "done" || existing.status === "cancelled") &&
+          existing.assigneeAgentId
+        ) {
+          await tx
+            .delete(issueAgentArchives)
+            .where(
+              and(
+                eq(issueAgentArchives.companyId, existing.companyId),
+                eq(issueAgentArchives.issueId, existing.id),
+                eq(issueAgentArchives.agentId, existing.assigneeAgentId),
+              ),
+            );
+        }
         if (nextLabelIds !== undefined) {
           await syncIssueLabels(updated.id, existing.companyId, nextLabelIds, tx);
         }
         const [enriched] = await withIssueLabels(tx, [updated]);
         return enriched;
       });
+
+      // Fire-and-forget runbook review when issue is closed with resolution notes
+      if (result && isClosing) {
+        const comments = await db
+          .select({
+            authorAgentId: issueComments.authorAgentId,
+            authorUserId: issueComments.authorUserId,
+            body: issueComments.body,
+            createdAt: issueComments.createdAt,
+          })
+          .from(issueComments)
+          .where(eq(issueComments.issueId, id))
+          .orderBy(issueComments.createdAt);
+
+        const snapshot: RunbookReviewSnapshot = {
+          issueId: result.id,
+          identifier: result.identifier ?? result.id,
+          title: result.title,
+          description: result.description ?? null,
+          resolutionNotes: (result.resolutionNotes ?? ""),
+          status: result.status as "done" | "cancelled",
+          projectId: result.projectId ?? null,
+          companyId: result.companyId,
+          closedAt: new Date().toISOString(),
+          comments: comments.map((c) => ({
+            authorAgentId: c.authorAgentId ?? null,
+            authorUserId: c.authorUserId ?? null,
+            body: c.body,
+            createdAt: c.createdAt.toISOString(),
+          })),
+        };
+        void enqueueRunbookReview(db, snapshot);
+      }
+
+      return result;
     },
 
     remove: (id: string) =>
@@ -1575,10 +1737,11 @@ export function issueService(db: Db) {
         });
       }
 
+      const newStatus = ['done', 'cancelled'].includes(existing.status) ? existing.status : 'todo';
       const updated = await db
         .update(issues)
         .set({
-          status: "todo",
+          status: newStatus,
           assigneeAgentId: null,
           checkoutRunId: null,
           updatedAt: new Date(),
@@ -1592,7 +1755,7 @@ export function issueService(db: Db) {
     },
 
     listLabels: (companyId: string) =>
-      db.select().from(labels).where(eq(labels.companyId, companyId)).orderBy(asc(labels.name), asc(labels.id)),
+      db.select().from(labels).where(eq(labels.companyId, companyId)).orderBy(asc(labels.name), asc(labels.id)).limit(500),
 
     getLabelById: (id: string) =>
       db
@@ -1669,7 +1832,7 @@ export function issueService(db: Db) {
           order === "asc" ? asc(issueComments.id) : desc(issueComments.id),
         );
 
-      const comments = limit ? await query.limit(limit) : await query;
+      const comments = await query.limit(limit ?? 1000);
       const { censorUsernameInLogs } = await instanceSettings.getGeneral();
       return comments.map((comment) => redactIssueComment(comment, censorUsernameInLogs));
     },
@@ -1918,14 +2081,25 @@ export function issueService(db: Db) {
 
       const explicitAgentMentionIds = extractAgentMentionIds(body);
       if (tokens.size === 0 && explicitAgentMentionIds.length === 0) return [];
-      const rows = await db.select({ id: agents.id, name: agents.name })
-        .from(agents).where(eq(agents.companyId, companyId));
+
       const resolved = new Set<string>(explicitAgentMentionIds);
-      for (const agent of rows) {
-        if (tokens.has(agent.name.toLowerCase())) {
-          resolved.add(agent.id);
+
+      if (tokens.size > 0) {
+        const tokenList = [...tokens];
+        const nameRows = await db
+          .select({ id: agents.id })
+          .from(agents)
+          .where(
+            and(
+              eq(agents.companyId, companyId),
+              or(...tokenList.map((t) => sql`lower(${agents.name}) = ${t}`)),
+            ),
+          );
+        for (const row of nameRows) {
+          resolved.add(row.id);
         }
       }
+
       return [...resolved];
     },
 
@@ -1972,31 +2146,45 @@ export function issueService(db: Db) {
     },
 
     getAncestors: async (issueId: string) => {
-      const raw: Array<{
+      type AncestorRow = {
         id: string; identifier: string | null; title: string; description: string | null;
         status: string; priority: string;
         assigneeAgentId: string | null; projectId: string | null; goalId: string | null;
-      }> = [];
-      const visited = new Set<string>([issueId]);
-      const start = await db.select().from(issues).where(eq(issues.id, issueId)).then(r => r[0] ?? null);
-      let currentId = start?.parentId ?? null;
-      while (currentId && !visited.has(currentId) && raw.length < 50) {
-        visited.add(currentId);
-        const parent = await db.select({
-          id: issues.id, identifier: issues.identifier, title: issues.title, description: issues.description,
-          status: issues.status, priority: issues.priority,
-          assigneeAgentId: issues.assigneeAgentId, projectId: issues.projectId,
-          goalId: issues.goalId, parentId: issues.parentId,
-        }).from(issues).where(eq(issues.id, currentId)).then(r => r[0] ?? null);
-        if (!parent) break;
-        raw.push({
-          id: parent.id, identifier: parent.identifier ?? null, title: parent.title, description: parent.description ?? null,
-          status: parent.status, priority: parent.priority,
-          assigneeAgentId: parent.assigneeAgentId ?? null,
-          projectId: parent.projectId ?? null, goalId: parent.goalId ?? null,
-        });
-        currentId = parent.parentId ?? null;
-      }
+      };
+      const cteRows = await db.execute<{
+        id: string; identifier: string | null; title: string; description: string | null;
+        status: string; priority: string;
+        assignee_agent_id: string | null; project_id: string | null; goal_id: string | null;
+      }>(sql`
+        WITH RECURSIVE ancestors AS (
+          SELECT id, parent_id, identifier, title, description, status, priority,
+                 assignee_agent_id, project_id, goal_id, 0 AS depth
+          FROM issues
+          WHERE id = ${issueId}
+          UNION ALL
+          SELECT i.id, i.parent_id, i.identifier, i.title, i.description, i.status, i.priority,
+                 i.assignee_agent_id, i.project_id, i.goal_id, a.depth + 1
+          FROM issues i
+          JOIN ancestors a ON i.id = a.parent_id
+          WHERE a.depth < 50
+        )
+        SELECT id, identifier, title, description, status, priority,
+               assignee_agent_id, project_id, goal_id
+        FROM ancestors
+        WHERE id != ${issueId}
+        ORDER BY depth ASC
+      `);
+      const raw: AncestorRow[] = [...cteRows].map(r => ({
+        id: r.id,
+        identifier: r.identifier ?? null,
+        title: r.title,
+        description: r.description ?? null,
+        status: r.status,
+        priority: r.priority,
+        assigneeAgentId: r.assignee_agent_id ?? null,
+        projectId: r.project_id ?? null,
+        goalId: r.goal_id ?? null,
+      }));
 
       // Batch-fetch referenced projects and goals
       const projectIds = [...new Set(raw.map(a => a.projectId).filter((id): id is string => id != null))];

@@ -1926,12 +1926,6 @@ function resolveWorkerEntrypoint(
     }
   }
 
-  // Fallback: try the worker path as-is (absolute or relative to cwd)
-  // ONLY if it's already an absolute path and we trust the manifest (which we've already validated)
-  if (path.isAbsolute(workerRelPath) && existsSync(workerRelPath)) {
-    return workerRelPath;
-  }
-
   throw new Error(
     `Worker entrypoint not found for plugin "${plugin.pluginKey}". ` +
       `Checked: ${path.resolve(packageDir, workerRelPath)}, ` +

@@ -19,6 +19,9 @@ export interface BudgetPolicy {
   warnPercent: number;
   hardStopEnabled: boolean;
   notifyEnabled: boolean;
+  velocityWindowMinutes: number | null;
+  velocityWarnCents: number | null;
+  velocityHardCents: number | null;
   isActive: boolean;
   createdByUserId: string | null;
   updatedByUserId: string | null;
@@ -41,6 +44,10 @@ export interface BudgetPolicySummary {
   warnPercent: number;
   hardStopEnabled: boolean;
   notifyEnabled: boolean;
+  velocityWindowMinutes: number | null;
+  velocityWarnCents: number | null;
+  velocityHardCents: number | null;
+  velocityCurrentCents: number | null;
   isActive: boolean;
   status: "ok" | "warning" | "hard_stop";
   paused: boolean;
@@ -89,6 +96,9 @@ export interface BudgetPolicyUpsertInput {
   warnPercent?: number;
   hardStopEnabled?: boolean;
   notifyEnabled?: boolean;
+  velocityWindowMinutes?: number | null;
+  velocityWarnCents?: number | null;
+  velocityHardCents?: number | null;
   isActive?: boolean;
 }
 

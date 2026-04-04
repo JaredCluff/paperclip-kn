@@ -153,6 +153,7 @@ export function companyRoutes(db: Db, storage?: StorageService) {
 
   router.post("/:companyId/export", validate(companyPortabilityExportSchema), async (req, res) => {
     const companyId = req.params.companyId as string;
+    assertBoard(req);
     assertCompanyAccess(req, companyId);
     const result = await portability.exportBundle(companyId, req.body);
     res.json(result);

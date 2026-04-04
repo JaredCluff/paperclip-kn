@@ -46,6 +46,7 @@ import {
   writePaperclipSkillSyncPreference,
 } from "@paperclipai/adapter-utils/server-utils";
 import { notFound, unprocessable } from "../errors.js";
+import { assertNotSsrfTarget } from "../adapters/ssrf.js";
 import { ghFetch, gitHubApiBase, resolveRawGitHubUrl } from "./github-fetch.js";
 import type { StorageService } from "../storage/types.js";
 import { accessService } from "./access.js";
@@ -2135,6 +2136,7 @@ function parseFrontmatterMarkdown(raw: string): MarkdownDoc {
 }
 
 async function fetchText(url: string) {
+  await assertNotSsrfTarget(url);
   const response = await ghFetch(url);
   if (!response.ok) {
     throw unprocessable(`Failed to fetch ${url}: ${response.status}`);
@@ -2143,6 +2145,7 @@ async function fetchText(url: string) {
 }
 
 async function fetchOptionalText(url: string) {
+  await assertNotSsrfTarget(url);
   const response = await ghFetch(url);
   if (response.status === 404) return null;
   if (!response.ok) {
@@ -2152,6 +2155,7 @@ async function fetchOptionalText(url: string) {
 }
 
 async function fetchBinary(url: string) {
+  await assertNotSsrfTarget(url);
   const response = await ghFetch(url);
   if (!response.ok) {
     throw unprocessable(`Failed to fetch ${url}: ${response.status}`);
@@ -2160,6 +2164,7 @@ async function fetchBinary(url: string) {
 }
 
 async function fetchJson<T>(url: string): Promise<T> {
+  await assertNotSsrfTarget(url);
   const response = await ghFetch(url, {
     headers: {
       accept: "application/vnd.github+json",

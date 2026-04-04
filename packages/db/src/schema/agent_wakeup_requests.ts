@@ -7,7 +7,7 @@ export const agentWakeupRequests = pgTable(
   {
     id: uuid("id").primaryKey().defaultRandom(),
     companyId: uuid("company_id").notNull().references(() => companies.id),
-    agentId: uuid("agent_id").notNull().references(() => agents.id),
+    agentId: uuid("agent_id").notNull().references(() => agents.id, { onDelete: "cascade" }),
     source: text("source").notNull(),
     triggerDetail: text("trigger_detail"),
     reason: text("reason"),

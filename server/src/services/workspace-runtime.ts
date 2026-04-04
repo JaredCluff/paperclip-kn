@@ -9,6 +9,7 @@ import type { Db } from "@paperclipai/db";
 import { executionWorkspaces, projectWorkspaces, workspaceRuntimeServices } from "@paperclipai/db";
 import { and, desc, eq, inArray } from "drizzle-orm";
 import { asNumber, asString, parseObject, renderTemplate } from "../adapters/utils.js";
+import { assertNotSsrfTarget } from "../adapters/ssrf.js";
 import { resolveHomeAwarePath } from "../home-paths.js";
 import {
   createLocalServiceKey,
@@ -122,16 +123,42 @@ function stableStringify(value: unknown): string {
   return JSON.stringify(value);
 }
 
+// Credential-bearing env var prefixes and exact names that must never reach agent processes
+const SANITIZE_PREFIXES = [
+  "PAPERCLIP_",
+  "AWS_",
+  "GCP_",
+  "GOOGLE_",
+  "AZURE_",
+  "GITHUB_",
+  "GITLAB_",
+  "npm_config_",
+];
+const SANITIZE_EXACT = new Set([
+  "DATABASE_URL",
+  "DATABASE_DIRECT_URL",
+  "STRIPE_SECRET_KEY",
+  "STRIPE_WEBHOOK_SECRET",
+  "OPENAI_API_KEY",
+  "ANTHROPIC_API_KEY",
+  "SENDGRID_API_KEY",
+  "SLACK_BOT_TOKEN",
+  "SLACK_SIGNING_SECRET",
+  "TAILSCALE_AUTH_KEY",
+  "NODE_EXTRA_CA_CERTS",
+  "NODE_TLS_REJECT_UNAUTHORIZED",
+]);
+
 export function sanitizeRuntimeServiceBaseEnv(baseEnv: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
   const env: NodeJS.ProcessEnv = { ...baseEnv };
   for (const key of Object.keys(env)) {
-    if (key.startsWith("PAPERCLIP_")) {
+    if (
+      SANITIZE_EXACT.has(key) ||
+      SANITIZE_PREFIXES.some((prefix) => key.startsWith(prefix))
+    ) {
       delete env[key];
     }
   }
-  delete env.DATABASE_URL;
-  delete env.npm_config_tailscale_auth;
-  delete env.npm_config_authenticated_private;
   return env;
 }
 
@@ -268,7 +295,7 @@ async function executeProcess(input: {
     const child = spawn(input.command, input.args, {
       cwd: input.cwd,
       stdio: ["ignore", "pipe", "pipe"],
-      env: input.env ?? process.env,
+      env: input.env ?? sanitizeRuntimeServiceBaseEnv(process.env),
     });
     let stdout = "";
     let stderr = "";
@@ -355,7 +382,7 @@ function buildWorkspaceCommandEnv(input: {
   agent: ExecutionWorkspaceAgentRef;
   created: boolean;
 }) {
-  const env: NodeJS.ProcessEnv = { ...process.env };
+  const env: NodeJS.ProcessEnv = { ...sanitizeRuntimeServiceBaseEnv(process.env) };
   env.PAPERCLIP_WORKSPACE_CWD = input.worktreePath;
   env.PAPERCLIP_WORKSPACE_PATH = input.worktreePath;
   env.PAPERCLIP_WORKSPACE_WORKTREE_PATH = input.worktreePath;
@@ -520,6 +547,8 @@ async function provisionExecutionWorktree(input: {
   created: boolean;
   recorder?: WorkspaceOperationRecorder | null;
 }) {
+  // SECURITY: provisionCommand originates from project executionWorkspacePolicy.workspaceStrategy,
+  // which is restricted to board members only (agents are blocked at the route layer in projects.ts).
   const provisionCommand = asString(input.strategy.provisionCommand, "").trim();
   if (!provisionCommand) return;
 
@@ -774,6 +803,9 @@ export async function cleanupExecutionWorkspaceArtifacts(input: {
     projectWorkspaceCwd: input.projectWorkspace?.cwd ?? null,
   });
   const createdByRuntime = input.workspace.metadata?.createdByRuntime === true;
+  // SECURITY: cleanupCommand and teardownCommand originate from project workspace settings and
+  // executionWorkspacePolicy.workspaceStrategy respectively. Both are restricted to board members
+  // only (agents are blocked at the route layer in projects.ts).
   const cleanupCommands = [
     input.cleanupCommand ?? null,
     input.projectWorkspace?.cleanupCommand ?? null,
@@ -1067,6 +1099,9 @@ async function waitForReadiness(input: {
   const timeoutSec = Math.max(1, asNumber(readiness.timeoutSec, 30));
   const intervalMs = Math.max(100, asNumber(readiness.intervalMs, 500));
   const deadline = Date.now() + timeoutSec * 1000;
+  // Validate the readiness URL against SSRF targets before polling.
+  // The URL originates from user-configurable workspace/project settings.
+  await assertNotSsrfTarget(input.url);
   let lastError = "service did not become ready";
   while (Date.now() < deadline) {
     try {

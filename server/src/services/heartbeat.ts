@@ -2,7 +2,7 @@ import fs from "node:fs/promises";
 import path from "node:path";
 import { execFile as execFileCallback } from "node:child_process";
 import { promisify } from "node:util";
-import { and, asc, desc, eq, gt, inArray, sql } from "drizzle-orm";
+import { and, asc, desc, eq, gt, inArray, notInArray, sql } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
 import type { BillingType, ExecutionWorkspace, ExecutionWorkspaceConfig } from "@paperclipai/shared";
 import {
@@ -174,6 +174,17 @@ function deriveRepoNameFromRepoUrl(repoUrl: string | null): string | null {
   }
 }
 
+function assertSafeGitUrl(url: string): void {
+  const SAFE_PROTOCOLS = ['https://', 'http://', 'git://', 'ssh://'];
+  const trimmed = url.trim();
+  if (!SAFE_PROTOCOLS.some(p => trimmed.startsWith(p))) {
+    throw new Error(`Unsafe git URL protocol: ${trimmed}`);
+  }
+  if (trimmed.includes('::') || trimmed.startsWith('-')) {
+    throw new Error(`Unsafe git URL: ${trimmed}`);
+  }
+}
+
 async function ensureManagedProjectWorkspace(input: {
   companyId: string;
   projectId: string;
@@ -212,6 +223,8 @@ async function ensureManagedProjectWorkspace(input: {
     }
     await fs.rm(cwd, { recursive: true, force: true });
   }
+
+  assertSafeGitUrl(input.repoUrl);
 
   try {
     await execFile("git", ["clone", input.repoUrl, cwd], {
@@ -1402,27 +1415,8 @@ export function heartbeatService(db: Db) {
     lastRunId: string | null;
     lastError: string | null;
   }) {
-    const existing = await getTaskSession(
-      input.companyId,
-      input.agentId,
-      input.adapterType,
-      input.taskKey,
-    );
-    if (existing) {
-      return db
-        .update(agentTaskSessions)
-        .set({
-          sessionParamsJson: input.sessionParamsJson,
-          sessionDisplayId: input.sessionDisplayId,
-          lastRunId: input.lastRunId,
-          lastError: input.lastError,
-          updatedAt: new Date(),
-        })
-        .where(eq(agentTaskSessions.id, existing.id))
-        .returning()
-        .then((rows) => rows[0] ?? null);
-    }
-
+    // Atomic upsert against the unique index on (companyId, agentId,
+    // adapterType, taskKey) to prevent TOCTOU races under concurrent calls.
     return db
       .insert(agentTaskSessions)
       .values({
@@ -1434,6 +1428,21 @@ export function heartbeatService(db: Db) {
         sessionDisplayId: input.sessionDisplayId,
         lastRunId: input.lastRunId,
         lastError: input.lastError,
+      })
+      .onConflictDoUpdate({
+        target: [
+          agentTaskSessions.companyId,
+          agentTaskSessions.agentId,
+          agentTaskSessions.adapterType,
+          agentTaskSessions.taskKey,
+        ],
+        set: {
+          sessionParamsJson: input.sessionParamsJson,
+          sessionDisplayId: input.sessionDisplayId,
+          lastRunId: input.lastRunId,
+          lastError: input.lastError,
+          updatedAt: new Date(),
+        },
       })
       .returning()
       .then((rows) => rows[0] ?? null);
@@ -1483,12 +1492,34 @@ export function heartbeatService(db: Db) {
     status: string,
     patch?: Partial<typeof heartbeatRuns.$inferInsert>,
   ) {
-    const updated = await db
+    const TERMINAL = new Set(["succeeded", "failed", "cancelled", "timed_out"]);
+
+    // Fetch current status to guard against backwards transitions
+    const current = await db
+      .select({ status: heartbeatRuns.status })
+      .from(heartbeatRuns)
+      .where(eq(heartbeatRuns.id, runId))
+      .then((rows) => rows[0] ?? null);
+
+    if (current && TERMINAL.has(current.status)) {
+      // Already terminal — silently ignore (idempotent cancel/fail is common)
+      if (current.status === status) return null;
+      return null; // Don't allow any transition out of terminal state
+    }
+
+    const casResult = await db
       .update(heartbeatRuns)
       .set({ status, ...patch, updatedAt: new Date() })
-      .where(eq(heartbeatRuns.id, runId))
+      .where(and(eq(heartbeatRuns.id, runId), eq(heartbeatRuns.status, current?.status ?? status)))
       .returning()
       .then((rows) => rows[0] ?? null);
+
+    if (casResult === null) {
+      // Another process beat us to the transition — treat as idempotent success
+      return null;
+    }
+
+    const updated = casResult;
 
     if (updated) {
       publishLiveEvent({
@@ -3507,98 +3538,105 @@ export function heartbeatService(db: Db) {
       return newRun;
     }
 
-    const activeRuns = await db
-      .select()
-      .from(heartbeatRuns)
-      .where(and(eq(heartbeatRuns.agentId, agentId), inArray(heartbeatRuns.status, ["queued", "running"])))
-      .orderBy(desc(heartbeatRuns.createdAt));
+    const result = await db.transaction(async (tx) => {
+      const activeRuns = await tx
+        .select()
+        .from(heartbeatRuns)
+        .where(and(eq(heartbeatRuns.agentId, agentId), inArray(heartbeatRuns.status, ["queued", "running"])))
+        .orderBy(desc(heartbeatRuns.createdAt));
 
-    const sameScopeQueuedRun = activeRuns.find(
-      (candidate) => candidate.status === "queued" && isSameTaskScope(runTaskKey(candidate), taskKey),
-    );
-    const sameScopeRunningRun = activeRuns.find(
-      (candidate) => candidate.status === "running" && isSameTaskScope(runTaskKey(candidate), taskKey),
-    );
-    const shouldQueueFollowupForCommentWake =
-      Boolean(wakeCommentId) && Boolean(sameScopeRunningRun) && !sameScopeQueuedRun;
-
-    const coalescedTargetRun =
-      sameScopeQueuedRun ??
-      (shouldQueueFollowupForCommentWake ? null : sameScopeRunningRun ?? null);
-
-    if (coalescedTargetRun) {
-      const mergedContextSnapshot = mergeCoalescedContextSnapshot(
-        coalescedTargetRun.contextSnapshot,
-        contextSnapshot,
+      const sameScopeQueuedRun = activeRuns.find(
+        (candidate) => candidate.status === "queued" && isSameTaskScope(runTaskKey(candidate), taskKey),
       );
-      const mergedRun = await db
-        .update(heartbeatRuns)
+      const sameScopeRunningRun = activeRuns.find(
+        (candidate) => candidate.status === "running" && isSameTaskScope(runTaskKey(candidate), taskKey),
+      );
+      const shouldQueueFollowupForCommentWake =
+        Boolean(wakeCommentId) && Boolean(sameScopeRunningRun) && !sameScopeQueuedRun;
+
+      const coalescedTargetRun =
+        sameScopeQueuedRun ??
+        (shouldQueueFollowupForCommentWake ? null : sameScopeRunningRun ?? null);
+
+      if (coalescedTargetRun) {
+        const mergedContextSnapshot = mergeCoalescedContextSnapshot(
+          coalescedTargetRun.contextSnapshot,
+          contextSnapshot,
+        );
+        const mergedRun = await tx
+          .update(heartbeatRuns)
+          .set({
+            contextSnapshot: mergedContextSnapshot,
+            updatedAt: new Date(),
+          })
+          .where(eq(heartbeatRuns.id, coalescedTargetRun.id))
+          .returning()
+          .then((rows) => rows[0] ?? coalescedTargetRun);
+
+        await tx.insert(agentWakeupRequests).values({
+          companyId: agent.companyId,
+          agentId,
+          source,
+          triggerDetail,
+          reason,
+          payload,
+          status: "coalesced",
+          coalescedCount: 1,
+          requestedByActorType: opts.requestedByActorType ?? null,
+          requestedByActorId: opts.requestedByActorId ?? null,
+          idempotencyKey: opts.idempotencyKey ?? null,
+          runId: mergedRun.id,
+          finishedAt: new Date(),
+        });
+        return { kind: "coalesced" as const, run: mergedRun };
+      }
+
+      const wakeupRequest = await tx
+        .insert(agentWakeupRequests)
+        .values({
+          companyId: agent.companyId,
+          agentId,
+          source,
+          triggerDetail,
+          reason,
+          payload,
+          status: "queued",
+          requestedByActorType: opts.requestedByActorType ?? null,
+          requestedByActorId: opts.requestedByActorId ?? null,
+          idempotencyKey: opts.idempotencyKey ?? null,
+        })
+        .returning()
+        .then((rows) => rows[0]);
+
+      const newRun = await tx
+        .insert(heartbeatRuns)
+        .values({
+          companyId: agent.companyId,
+          agentId,
+          invocationSource: source,
+          triggerDetail,
+          status: "queued",
+          wakeupRequestId: wakeupRequest.id,
+          contextSnapshot: enrichedContextSnapshot,
+          sessionIdBefore: sessionBefore,
+        })
+        .returning()
+        .then((rows) => rows[0]);
+
+      await tx
+        .update(agentWakeupRequests)
         .set({
-          contextSnapshot: mergedContextSnapshot,
+          runId: newRun.id,
           updatedAt: new Date(),
         })
-        .where(eq(heartbeatRuns.id, coalescedTargetRun.id))
-        .returning()
-        .then((rows) => rows[0] ?? coalescedTargetRun);
+        .where(eq(agentWakeupRequests.id, wakeupRequest.id));
 
-      await db.insert(agentWakeupRequests).values({
-        companyId: agent.companyId,
-        agentId,
-        source,
-        triggerDetail,
-        reason,
-        payload,
-        status: "coalesced",
-        coalescedCount: 1,
-        requestedByActorType: opts.requestedByActorType ?? null,
-        requestedByActorId: opts.requestedByActorId ?? null,
-        idempotencyKey: opts.idempotencyKey ?? null,
-        runId: mergedRun.id,
-        finishedAt: new Date(),
-      });
-      return mergedRun;
-    }
+      return { kind: "queued" as const, run: newRun };
+    });
 
-    const wakeupRequest = await db
-      .insert(agentWakeupRequests)
-      .values({
-        companyId: agent.companyId,
-        agentId,
-        source,
-        triggerDetail,
-        reason,
-        payload,
-        status: "queued",
-        requestedByActorType: opts.requestedByActorType ?? null,
-        requestedByActorId: opts.requestedByActorId ?? null,
-        idempotencyKey: opts.idempotencyKey ?? null,
-      })
-      .returning()
-      .then((rows) => rows[0]);
+    if (result.kind === "coalesced") return result.run;
 
-    const newRun = await db
-      .insert(heartbeatRuns)
-      .values({
-        companyId: agent.companyId,
-        agentId,
-        invocationSource: source,
-        triggerDetail,
-        status: "queued",
-        wakeupRequestId: wakeupRequest.id,
-        contextSnapshot: enrichedContextSnapshot,
-        sessionIdBefore: sessionBefore,
-      })
-      .returning()
-      .then((rows) => rows[0]);
-
-    await db
-      .update(agentWakeupRequests)
-      .set({
-        runId: newRun.id,
-        updatedAt: new Date(),
-      })
-      .where(eq(agentWakeupRequests.id, wakeupRequest.id));
-
+    const newRun = result.run;
     publishLiveEvent({
       companyId: newRun.companyId,
       type: "heartbeat.run.queued",
@@ -3764,25 +3802,30 @@ export function heartbeatService(db: Db) {
       .from(heartbeatRuns)
       .where(and(eq(heartbeatRuns.agentId, agentId), inArray(heartbeatRuns.status, ["queued", "running"])));
 
+    // Kill processes synchronously before any DB work
     for (const run of runs) {
-      await setRunStatus(run.id, "cancelled", {
-        finishedAt: new Date(),
-        error: reason,
-        errorCode: "cancelled",
-      });
-
-      await setWakeupStatus(run.wakeupRequestId, "cancelled", {
-        finishedAt: new Date(),
-        error: reason,
-      });
-
       const running = runningProcesses.get(run.id);
       if (running) {
         running.child.kill("SIGTERM");
         runningProcesses.delete(run.id);
       }
-      await releaseIssueExecutionAndPromote(run);
     }
+
+    // Parallelize DB updates across runs (each run is independent)
+    await Promise.all(
+      runs.map(async (run) => {
+        await setRunStatus(run.id, "cancelled", {
+          finishedAt: new Date(),
+          error: reason,
+          errorCode: "cancelled",
+        });
+        await setWakeupStatus(run.wakeupRequestId, "cancelled", {
+          finishedAt: new Date(),
+          error: reason,
+        });
+        await releaseIssueExecutionAndPromote(run);
+      }),
+    );
 
     return runs.length;
   }
@@ -3808,9 +3851,7 @@ export function heartbeatService(db: Db) {
           .then((rows) => rows.map((row) => row.id))
         : await listProjectScopedRunIds(scope.companyId, scope.scopeId);
 
-    for (const runId of runIds) {
-      await cancelRunInternal(runId, "Cancelled due to budget pause");
-    }
+    await Promise.all(runIds.map((runId) => cancelRunInternal(runId, "Cancelled due to budget pause")));
 
     await cancelPendingWakeupsForBudgetScope(scope);
   }
@@ -3955,14 +3996,22 @@ export function heartbeatService(db: Db) {
     resumeQueuedRuns,
 
     tickTimers: async (now = new Date()) => {
-      const allAgents = await db.select().from(agents);
+      const allAgents = await db
+        .select({
+          id: agents.id,
+          status: agents.status,
+          runtimeConfig: agents.runtimeConfig,
+          lastHeartbeatAt: agents.lastHeartbeatAt,
+          createdAt: agents.createdAt,
+        })
+        .from(agents)
+        .where(notInArray(agents.status, ["paused", "terminated", "pending_approval"]));
       let checked = 0;
       let enqueued = 0;
       let skipped = 0;
 
       for (const agent of allAgents) {
-        if (agent.status === "paused" || agent.status === "terminated" || agent.status === "pending_approval") continue;
-        const policy = parseHeartbeatPolicy(agent);
+        const policy = parseHeartbeatPolicy(agent as typeof agents.$inferSelect);
         if (!policy.enabled || policy.intervalSec <= 0) continue;
 
         checked += 1;

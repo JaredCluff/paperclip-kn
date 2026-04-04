@@ -23,12 +23,13 @@ import type {
 } from "@paperclipai/shared";
 import { notFound, unprocessable } from "../errors.js";
 import { logActivity } from "./activity-log.js";
+import { publishLiveEvent } from "./live-events.js";
 
 type ScopeRecord = {
   companyId: string;
   name: string;
   paused: boolean;
-  pauseReason: "manual" | "budget" | "system" | null;
+  pauseReason: "manual" | "budget" | "budget_velocity" | "system" | null;
 };
 
 type PolicyRow = typeof budgetPolicies.$inferSelect;
@@ -153,6 +154,29 @@ async function computeObservedAmount(
     conditions.push(gte(costEvents.occurredAt, start));
     conditions.push(lt(costEvents.occurredAt, end));
   }
+
+  const [row] = await db
+    .select({
+      total: sql<number>`coalesce(sum(${costEvents.costCents}), 0)::int`,
+    })
+    .from(costEvents)
+    .where(and(...conditions));
+
+  return Number(row?.total ?? 0);
+}
+
+async function computeVelocitySpend(
+  db: Db,
+  policy: Pick<PolicyRow, "companyId" | "scopeType" | "scopeId">,
+  windowMinutes: number,
+) {
+  const windowStart = new Date(Date.now() - windowMinutes * 60 * 1000);
+  const conditions = [
+    eq(costEvents.companyId, policy.companyId),
+    gte(costEvents.occurredAt, windowStart),
+  ];
+  if (policy.scopeType === "agent") conditions.push(eq(costEvents.agentId, policy.scopeId));
+  if (policy.scopeType === "project") conditions.push(eq(costEvents.projectId, policy.scopeId));
 
   const [row] = await db
     .select({
@@ -295,6 +319,91 @@ export function budgetService(db: Db, hooks: BudgetServiceHooks = {}) {
       .where(and(eq(companies.id, policy.scopeId), eq(companies.pauseReason, "budget")));
   }
 
+  async function pauseScopeForVelocity(policy: PolicyRow) {
+    const now = new Date();
+    if (policy.scopeType === "agent") {
+      await db
+        .update(agents)
+        .set({
+          status: "paused",
+          pauseReason: "budget_velocity",
+          pausedAt: now,
+          updatedAt: now,
+        })
+        .where(and(eq(agents.id, policy.scopeId), inArray(agents.status, ["active", "idle", "running", "error"])));
+      return;
+    }
+
+    if (policy.scopeType === "project") {
+      await db
+        .update(projects)
+        .set({
+          pauseReason: "budget_velocity",
+          pausedAt: now,
+          updatedAt: now,
+        })
+        .where(eq(projects.id, policy.scopeId));
+      return;
+    }
+
+    await db
+      .update(companies)
+      .set({
+        status: "paused",
+        pauseReason: "budget_velocity",
+        pausedAt: now,
+        updatedAt: now,
+      })
+      .where(eq(companies.id, policy.scopeId));
+  }
+
+  async function pauseAndCancelScopeForVelocity(policy: PolicyRow) {
+    await pauseScopeForVelocity(policy);
+    await hooks.cancelWorkForScope?.({
+      companyId: policy.companyId,
+      scopeType: policy.scopeType as BudgetScopeType,
+      scopeId: policy.scopeId,
+    });
+  }
+
+  async function resumeScopeFromVelocity(policy: PolicyRow) {
+    const now = new Date();
+    if (policy.scopeType === "agent") {
+      await db
+        .update(agents)
+        .set({
+          status: "idle",
+          pauseReason: null,
+          pausedAt: null,
+          updatedAt: now,
+        })
+        .where(and(eq(agents.id, policy.scopeId), eq(agents.pauseReason, "budget_velocity")));
+      return;
+    }
+
+    if (policy.scopeType === "project") {
+      await db
+        .update(projects)
+        .set({
+          pauseReason: null,
+          pausedAt: null,
+          updatedAt: now,
+        })
+        .where(and(eq(projects.id, policy.scopeId), eq(projects.pauseReason, "budget_velocity")));
+      return;
+    }
+
+    await db
+      .update(companies)
+      .set({
+        status: "active",
+        pauseReason: null,
+        pausedAt: null,
+        updatedAt: now,
+      })
+      .where(and(eq(companies.id, policy.scopeId), eq(companies.pauseReason, "budget_velocity")));
+  }
+
   async function getPolicyRow(policyId: string) {
     const policy = await db
       .select()
@@ -320,6 +429,9 @@ export function budgetService(db: Db, hooks: BudgetServiceHooks = {}) {
     const amount = policy.isActive ? policy.amount : 0;
     const utilizationPercent =
       amount > 0 ? Number(((observedAmount / amount) * 100).toFixed(2)) : 0;
+    const velocityCurrentCents = policy.velocityWindowMinutes != null
+      ? await computeVelocitySpend(db, policy, policy.velocityWindowMinutes)
+      : null;
     return {
       policyId: policy.id,
       companyId: policy.companyId,
@@ -335,6 +447,10 @@ export function budgetService(db: Db, hooks: BudgetServiceHooks = {}) {
       warnPercent: policy.warnPercent,
       hardStopEnabled: policy.hardStopEnabled,
       notifyEnabled: policy.notifyEnabled,
+      velocityWindowMinutes: policy.velocityWindowMinutes,
+      velocityWarnCents: policy.velocityWarnCents,
+      velocityHardCents: policy.velocityHardCents,
+      velocityCurrentCents,
       isActive: policy.isActive,
       status: policy.isActive
         ? budgetStatusFromObserved(observedAmount, amount, policy.warnPercent)
@@ -352,20 +468,9 @@ export function budgetService(db: Db, hooks: BudgetServiceHooks = {}) {
     amountObserved: number,
   ) {
     const { start, end } = resolveWindow(policy.windowKind as BudgetWindowKind);
-    const existing = await db
-      .select()
-      .from(budgetIncidents)
-      .where(
-        and(
-          eq(budgetIncidents.policyId, policy.id),
-          eq(budgetIncidents.windowStart, start),
-          eq(budgetIncidents.thresholdType, thresholdType),
-          ne(budgetIncidents.status, "dismissed"),
-        ),
-      )
-      .then((rows) => rows[0] ?? null);
-    if (existing) return existing;
 
+    // Resolve scope outside the transaction — it's a read-only lookup that
+    // does not need to be serialized with the incident insert.
     const scope = await resolveScopeRecord(db, policy.scopeType as BudgetScopeType, policy.scopeId);
     const payload = buildApprovalPayload({
       policy,
@@ -376,40 +481,59 @@ export function budgetService(db: Db, hooks: BudgetServiceHooks = {}) {
       windowEnd: end,
     });
 
-    const approval = thresholdType === "hard"
-      ? await db
-        .insert(approvals)
+    return db.transaction(async (tx) => {
+      // Re-check inside the transaction to prevent duplicate incidents from
+      // concurrent budget checks both passing the pre-transaction SELECT.
+      const existing = await tx
+        .select()
+        .from(budgetIncidents)
+        .where(
+          and(
+            eq(budgetIncidents.policyId, policy.id),
+            eq(budgetIncidents.windowStart, start),
+            eq(budgetIncidents.thresholdType, thresholdType),
+            ne(budgetIncidents.status, "dismissed"),
+          ),
+        )
+        .then((rows) => rows[0] ?? null);
+      if (existing) return existing;
+
+      const approval = (thresholdType === "hard" || thresholdType === "velocity_hard_stop")
+        ? await tx
+          .insert(approvals)
+          .values({
+            companyId: policy.companyId,
+            type: "budget_override_required",
+            requestedByUserId: null,
+            requestedByAgentId: null,
+            status: "pending",
+            payload,
+          })
+          .returning()
+          .then((rows) => rows[0] ?? null)
+        : null;
+
+      return tx
+        .insert(budgetIncidents)
         .values({
           companyId: policy.companyId,
-          type: "budget_override_required",
-          requestedByUserId: null,
-          requestedByAgentId: null,
-          status: "pending",
-          payload,
+          policyId: policy.id,
+          scopeType: policy.scopeType,
+          scopeId: policy.scopeId,
+          metric: policy.metric,
+          windowKind: policy.windowKind,
+          windowStart: start,
+          windowEnd: end,
+          thresholdType,
+          amountLimit: policy.amount,
+          amountObserved,
+          status: "open",
+          approvalId: approval?.id ?? null,
         })
+        .onConflictDoNothing()
         .returning()
-        .then((rows) => rows[0] ?? null)
-      : null;
-
-    return db
-      .insert(budgetIncidents)
-      .values({
-        companyId: policy.companyId,
-        policyId: policy.id,
-        scopeType: policy.scopeType,
-        scopeId: policy.scopeId,
-        metric: policy.metric,
-        windowKind: policy.windowKind,
-        windowStart: start,
-        windowEnd: end,
-        thresholdType,
-        amountLimit: policy.amount,
-        amountObserved,
-        status: "open",
-        approvalId: approval?.id ?? null,
-      })
-      .returning()
-      .then((rows) => rows[0] ?? null);
+        .then((rows) => rows[0] ?? null);
+    });
   }
 
   async function resolveOpenSoftIncidents(policyId: string) {
@@ -532,59 +656,69 @@ export function budgetService(db: Db, hooks: BudgetServiceHooks = {}) {
         .then((rows) => rows[0] ?? null);
 
       const now = new Date();
-      const row = existing
-        ? await db
-          .update(budgetPolicies)
-          .set({
-            amount,
-            warnPercent: input.warnPercent ?? existing.warnPercent,
-            hardStopEnabled: input.hardStopEnabled ?? existing.hardStopEnabled,
-            notifyEnabled: input.notifyEnabled ?? existing.notifyEnabled,
-            isActive: nextIsActive,
-            updatedByUserId: actorUserId,
-            updatedAt: now,
-          })
-          .where(eq(budgetPolicies.id, existing.id))
-          .returning()
-          .then((rows) => rows[0])
-        : await db
-          .insert(budgetPolicies)
-          .values({
-            companyId,
-            scopeType: input.scopeType,
-            scopeId: input.scopeId,
-            metric,
-            windowKind,
-            amount,
-            warnPercent: input.warnPercent ?? 80,
-            hardStopEnabled: input.hardStopEnabled ?? true,
-            notifyEnabled: input.notifyEnabled ?? true,
-            isActive: nextIsActive,
-            createdByUserId: actorUserId,
-            updatedByUserId: actorUserId,
-          })
-          .returning()
-          .then((rows) => rows[0]);
+      const row = await db.transaction(async (tx) => {
+        const policyRow = existing
+          ? await tx
+            .update(budgetPolicies)
+            .set({
+              amount,
+              warnPercent: input.warnPercent ?? existing.warnPercent,
+              hardStopEnabled: input.hardStopEnabled ?? existing.hardStopEnabled,
+              notifyEnabled: input.notifyEnabled ?? existing.notifyEnabled,
+              velocityWindowMinutes: input.velocityWindowMinutes !== undefined ? input.velocityWindowMinutes : existing.velocityWindowMinutes,
+              velocityWarnCents: input.velocityWarnCents !== undefined ? input.velocityWarnCents : existing.velocityWarnCents,
+              velocityHardCents: input.velocityHardCents !== undefined ? input.velocityHardCents : existing.velocityHardCents,
+              isActive: nextIsActive,
+              updatedByUserId: actorUserId,
+              updatedAt: now,
+            })
+            .where(eq(budgetPolicies.id, existing.id))
+            .returning()
+            .then((rows) => rows[0])
+          : await tx
+            .insert(budgetPolicies)
+            .values({
+              companyId,
+              scopeType: input.scopeType,
+              scopeId: input.scopeId,
+              metric,
+              windowKind,
+              amount,
+              warnPercent: input.warnPercent ?? 80,
+              hardStopEnabled: input.hardStopEnabled ?? true,
+              notifyEnabled: input.notifyEnabled ?? true,
+              velocityWindowMinutes: input.velocityWindowMinutes ?? null,
+              velocityWarnCents: input.velocityWarnCents ?? null,
+              velocityHardCents: input.velocityHardCents ?? null,
+              isActive: nextIsActive,
+              createdByUserId: actorUserId,
+              updatedByUserId: actorUserId,
+            })
+            .returning()
+            .then((rows) => rows[0]);
 
-      if (input.scopeType === "company" && windowKind === "calendar_month_utc") {
-        await db
-          .update(companies)
-          .set({
-            budgetMonthlyCents: amount,
-            updatedAt: now,
-          })
-          .where(eq(companies.id, input.scopeId));
-      }
+        if (input.scopeType === "company" && windowKind === "calendar_month_utc") {
+          await tx
+            .update(companies)
+            .set({
+              budgetMonthlyCents: amount,
+              updatedAt: now,
+            })
+            .where(eq(companies.id, input.scopeId));
+        }
 
-      if (input.scopeType === "agent" && windowKind === "calendar_month_utc") {
-        await db
-          .update(agents)
-          .set({
-            budgetMonthlyCents: amount,
-            updatedAt: now,
-          })
-          .where(eq(agents.id, input.scopeId));
-      }
+        if (input.scopeType === "agent" && windowKind === "calendar_month_utc") {
+          await tx
+            .update(agents)
+            .set({
+              budgetMonthlyCents: amount,
+              updatedAt: now,
+            })
+            .where(eq(agents.id, input.scopeId));
+        }
+
+        return policyRow;
+      });
 
       if (amount > 0) {
         const observedAmount = await computeObservedAmount(db, row);
@@ -710,6 +844,67 @@ export function budgetService(db: Db, hooks: BudgetServiceHooks = {}) {
             });
           }
         }
+
+        if (policy.velocityWindowMinutes != null) {
+          const velocitySpend = await computeVelocitySpend(db, policy, policy.velocityWindowMinutes);
+
+          if (policy.velocityWarnCents != null && velocitySpend >= policy.velocityWarnCents) {
+            const warnIncident = await createIncidentIfNeeded(policy, "velocity_soft", velocitySpend);
+            if (warnIncident) {
+              await logActivity(db, {
+                companyId: policy.companyId,
+                actorType: "system",
+                actorId: "budget_service",
+                action: "budget.velocity_threshold_crossed",
+                entityType: "budget_incident",
+                entityId: warnIncident.id,
+                details: {
+                  scopeType: policy.scopeType,
+                  scopeId: policy.scopeId,
+                  velocitySpend,
+                  velocityWarnCents: policy.velocityWarnCents,
+                  windowMinutes: policy.velocityWindowMinutes,
+                },
+              });
+            }
+          }
+
+          if (policy.velocityHardCents != null && velocitySpend >= policy.velocityHardCents) {
+            const hardIncident = await createIncidentIfNeeded(policy, "velocity_hard_stop", velocitySpend);
+            await pauseAndCancelScopeForVelocity(policy);
+            publishLiveEvent({
+              companyId: policy.companyId,
+              type: "budget.velocity_threshold_crossed",
+              payload: {
+                scopeType: policy.scopeType,
+                scopeId: policy.scopeId,
+                velocitySpend,
+                velocityHardCents: policy.velocityHardCents,
+                windowMinutes: policy.velocityWindowMinutes,
+                policyId: policy.id,
+                incidentId: hardIncident?.id ?? null,
+              },
+            });
+            if (hardIncident) {
+              await logActivity(db, {
+                companyId: policy.companyId,
+                actorType: "system",
+                actorId: "budget_service",
+                action: "budget.velocity_threshold_crossed",
+                entityType: "budget_incident",
+                entityId: hardIncident.id,
+                details: {
+                  scopeType: policy.scopeType,
+                  scopeId: policy.scopeId,
+                  velocitySpend,
+                  velocityHardCents: policy.velocityHardCents,
+                  windowMinutes: policy.velocityWindowMinutes,
+                  approvalId: hardIncident.approvalId ?? null,
+                },
+              });
+            }
+          }
+        }
       }
     },
 
@@ -748,7 +943,9 @@ export function budgetService(db: Db, hooks: BudgetServiceHooks = {}) {
           reason:
             company.pauseReason === "budget"
               ? "Company is paused because its budget hard-stop was reached."
-              : "Company is paused and cannot start new work.",
+              : company.pauseReason === "budget_velocity"
+                ? "Company is paused because its budget spend velocity hard-stop was reached."
+                : "Company is paused and cannot start new work.",
         };
       }
 
@@ -777,12 +974,14 @@ export function budgetService(db: Db, hooks: BudgetServiceHooks = {}) {
         }
       }
 
-      if (agent.status === "paused" && agent.pauseReason === "budget") {
+      if (agent.status === "paused" && (agent.pauseReason === "budget" || agent.pauseReason === "budget_velocity")) {
         return {
           scopeType: "agent" as const,
           scopeId: agentId,
           scopeName: agent.name,
-          reason: "Agent is paused because its budget hard-stop was reached.",
+          reason: agent.pauseReason === "budget_velocity"
+            ? "Agent is paused because its budget spend velocity hard-stop was reached."
+            : "Agent is paused because its budget hard-stop was reached.",
         };
       }
 
@@ -852,12 +1051,14 @@ export function budgetService(db: Db, hooks: BudgetServiceHooks = {}) {
         }
       }
 
-      if (!project.pausedAt || project.pauseReason !== "budget") return null;
+      if (!project.pausedAt || (project.pauseReason !== "budget" && project.pauseReason !== "budget_velocity")) return null;
       return {
         scopeType: "project" as const,
         scopeId: project.id,
         scopeName: project.name,
-        reason: "Project is paused because its budget hard-stop was reached.",
+        reason: project.pauseReason === "budget_velocity"
+          ? "Project is paused because its budget spend velocity hard-stop was reached."
+          : "Project is paused because its budget hard-stop was reached.",
       };
     },
 
@@ -877,38 +1078,45 @@ export function budgetService(db: Db, hooks: BudgetServiceHooks = {}) {
 
       const policy = await getPolicyRow(incident.policyId);
       if (input.action === "raise_budget_and_resume") {
-        const nextAmount = Math.max(0, Math.floor(input.amount ?? 0));
-        const currentObserved = await computeObservedAmount(db, policy);
-        if (nextAmount <= currentObserved) {
-          throw unprocessable("New budget must exceed current observed spend");
-        }
-
         const now = new Date();
-        await db
-          .update(budgetPolicies)
-          .set({
-            amount: nextAmount,
-            isActive: true,
-            updatedByUserId: actorUserId,
-            updatedAt: now,
-          })
-          .where(eq(budgetPolicies.id, policy.id));
+        const isVelocityIncident = incident.thresholdType === "velocity_hard_stop" || incident.thresholdType === "velocity_soft";
 
-        if (policy.scopeType === "company" && policy.windowKind === "calendar_month_utc") {
+        if (!isVelocityIncident) {
+          const nextAmount = Math.max(0, Math.floor(input.amount ?? 0));
+          const currentObserved = await computeObservedAmount(db, policy);
+          if (nextAmount <= currentObserved) {
+            throw unprocessable("New budget must exceed current observed spend");
+          }
+
           await db
-            .update(companies)
-            .set({ budgetMonthlyCents: nextAmount, updatedAt: now })
-            .where(eq(companies.id, policy.scopeId));
+            .update(budgetPolicies)
+            .set({
+              amount: nextAmount,
+              isActive: true,
+              updatedByUserId: actorUserId,
+              updatedAt: now,
+            })
+            .where(eq(budgetPolicies.id, policy.id));
+
+          if (policy.scopeType === "company" && policy.windowKind === "calendar_month_utc") {
+            await db
+              .update(companies)
+              .set({ budgetMonthlyCents: nextAmount, updatedAt: now })
+              .where(eq(companies.id, policy.scopeId));
+          }
+
+          if (policy.scopeType === "agent" && policy.windowKind === "calendar_month_utc") {
+            await db
+              .update(agents)
+              .set({ budgetMonthlyCents: nextAmount, updatedAt: now })
+              .where(eq(agents.id, policy.scopeId));
+          }
+
+          await resumeScopeFromBudget(policy);
+        } else {
+          await resumeScopeFromVelocity(policy);
         }
 
-        if (policy.scopeType === "agent" && policy.windowKind === "calendar_month_utc") {
-          await db
-            .update(agents)
-            .set({ budgetMonthlyCents: nextAmount, updatedAt: now })
-            .where(eq(agents.id, policy.scopeId));
-        }
-
-        await resumeScopeFromBudget(policy);
         await db
           .update(budgetIncidents)
           .set({

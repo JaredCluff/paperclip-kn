@@ -31,6 +31,7 @@ import { setupLiveEventsWebSocketServer } from "./realtime/live-events-ws.js";
 import {
   feedbackService,
   heartbeatService,
+  issueService,
   reconcilePersistedRuntimeServicesOnStartup,
   routineService,
 } from "./services/index.js";
@@ -475,11 +476,10 @@ export async function startServer(): Promise<StartedServer> {
       resolveBetterAuthSession,
       resolveBetterAuthSessionFromHeaders,
     } = await import("./auth/better-auth.js");
-    const betterAuthSecret =
-      process.env.BETTER_AUTH_SECRET?.trim() ?? process.env.PAPERCLIP_AGENT_JWT_SECRET?.trim();
+    const betterAuthSecret = process.env.BETTER_AUTH_SECRET?.trim();
     if (!betterAuthSecret) {
       throw new Error(
-        "authenticated mode requires BETTER_AUTH_SECRET (or PAPERCLIP_AGENT_JWT_SECRET) to be set",
+        "authenticated mode requires BETTER_AUTH_SECRET to be set",
       );
     }
     const derivedTrustedOrigins = deriveAuthTrustedOrigins(config);
@@ -574,10 +574,15 @@ export async function startServer(): Promise<StartedServer> {
       logger.error({ err }, "startup reconciliation of persisted runtime services failed");
     });
   
+  let heartbeatInterval: ReturnType<typeof setInterval> | null = null;
+  let archiveSweepInterval: ReturnType<typeof setInterval> | null = null;
+  let backupInterval: ReturnType<typeof setInterval> | null = null;
+
   if (config.heartbeatSchedulerEnabled) {
     const heartbeat = heartbeatService(db as any);
     const routines = routineService(db as any);
-  
+    const issues = issueService(db as any);
+
     // Reap orphaned running runs at startup while in-memory execution state is empty,
     // then resume any persisted queued runs that were waiting on the previous process.
     void heartbeat
@@ -586,38 +591,68 @@ export async function startServer(): Promise<StartedServer> {
       .catch((err) => {
         logger.error({ err }, "startup heartbeat recovery failed");
       });
-    setInterval(() => {
-      void heartbeat
-        .tickTimers(new Date())
-        .then((result) => {
-          if (result.enqueued > 0) {
-            logger.info({ ...result }, "heartbeat timer tick enqueued runs");
-          }
-        })
-        .catch((err) => {
-          logger.error({ err }, "heartbeat timer tick failed");
-        });
+    let heartbeatTickInFlight = false;
 
-      void routines
-        .tickScheduledTriggers(new Date())
-        .then((result) => {
-          if (result.triggered > 0) {
-            logger.info({ ...result }, "routine scheduler tick enqueued runs");
-          }
-        })
-        .catch((err) => {
-          logger.error({ err }, "routine scheduler tick failed");
-        });
-  
-      // Periodically reap orphaned runs (5-min staleness threshold) and make sure
-      // persisted queued work is still being driven forward.
-      void heartbeat
-        .reapOrphanedRuns({ staleThresholdMs: 5 * 60 * 1000 })
-        .then(() => heartbeat.resumeQueuedRuns())
+    heartbeatInterval = setInterval(() => {
+      if (heartbeatTickInFlight) {
+        logger.warn("Skipping heartbeat tick because previous tick is still running");
+        return;
+      }
+      heartbeatTickInFlight = true;
+
+      const tick = async () => {
+        // tickTimers and routines can run in parallel
+        const [timerResult, routineResult] = await Promise.allSettled([
+          heartbeat.tickTimers(new Date()),
+          routines.tickScheduledTriggers(new Date()),
+        ]);
+
+        if (timerResult.status === "fulfilled" && timerResult.value.enqueued > 0) {
+          logger.info({ ...timerResult.value }, "heartbeat timer tick enqueued runs");
+        } else if (timerResult.status === "rejected") {
+          logger.error({ err: timerResult.reason }, "heartbeat timer tick failed");
+        }
+
+        if (routineResult.status === "fulfilled" && routineResult.value.triggered > 0) {
+          logger.info({ ...routineResult.value }, "routine scheduler tick enqueued runs");
+        } else if (routineResult.status === "rejected") {
+          logger.error({ err: routineResult.reason }, "routine scheduler tick failed");
+        }
+
+        // Periodically reap orphaned runs (5-min staleness threshold) and make sure
+        // persisted queued work is still being driven forward.
+        await heartbeat.reapOrphanedRuns({ staleThresholdMs: 5 * 60 * 1000 });
+        await heartbeat.resumeQueuedRuns();
+      };
+
+      void tick()
         .catch((err) => {
           logger.error({ err }, "periodic heartbeat recovery failed");
+        })
+        .finally(() => {
+          heartbeatTickInFlight = false;
         });
+
     }, config.heartbeatSchedulerIntervalMs);
+
+  let archiveSweepInFlight = false;
+  archiveSweepInterval = setInterval(() => {
+    if (archiveSweepInFlight) return;
+    archiveSweepInFlight = true;
+    void issues
+      .sweepAgentArchives()
+      .then((result) => {
+        if (result.archived > 0) {
+          logger.info({ archived: result.archived }, "agent archive sweep archived tickets");
+        }
+      })
+      .catch((err) => {
+        logger.error({ err }, "agent archive sweep failed");
+      })
+      .finally(() => {
+        archiveSweepInFlight = false;
+      });
+  }, 15 * 60 * 1000);
   }
   
   if (config.databaseBackupEnabled) {
@@ -663,11 +698,21 @@ export async function startServer(): Promise<StartedServer> {
       },
       "Automatic database backups enabled",
     );
-    setInterval(() => {
+    backupInterval = setInterval(() => {
       void runScheduledBackup();
     }, backupIntervalMs);
   }
   
+  process.on("uncaughtException", (err) => {
+    console.error("Uncaught exception — shutting down:", err);
+    process.exit(1);
+  });
+
+  process.on("unhandledRejection", (reason) => {
+    console.error("Unhandled promise rejection — shutting down:", reason);
+    process.exit(1);
+  });
+
   await new Promise<void>((resolveListen, rejectListen) => {
     const onError = (err: Error) => {
       server.off("error", onError);
@@ -728,33 +773,53 @@ export async function startServer(): Promise<StartedServer> {
     });
   });
   
-  {
-    const shutdown = async (signal: "SIGINT" | "SIGTERM") => {
-      const telemetryClient = getTelemetryClient();
-      if (telemetryClient) {
-        telemetryClient.stop();
-        await telemetryClient.flush();
-      }
+  const shutdown = async (signal: string) => {
+    logger.info({ signal }, "Received signal, shutting down gracefully");
 
-      if (embeddedPostgres && embeddedPostgresStartedByThisProcess) {
-        logger.info({ signal }, "Stopping embedded PostgreSQL");
-        try {
-          await embeddedPostgres?.stop();
-        } catch (err) {
-          logger.error({ err }, "Failed to stop embedded PostgreSQL cleanly");
-        }
-      }
+    // 1. Flush telemetry before stopping
+    const telemetryClient = getTelemetryClient();
+    if (telemetryClient) {
+      telemetryClient.stop();
+      await telemetryClient.flush();
+    }
 
-      process.exit(0);
-    };
-
-    process.once("SIGINT", () => {
-      void shutdown("SIGINT");
+    // 2. Stop accepting new connections
+    server.close(() => {
+      logger.info("HTTP server closed");
     });
-    process.once("SIGTERM", () => {
-      void shutdown("SIGTERM");
-    });
-  }
+
+    // 3. Clear all scheduled intervals
+    if (heartbeatInterval !== null) clearInterval(heartbeatInterval);
+    if (archiveSweepInterval !== null) clearInterval(archiveSweepInterval);
+    if (backupInterval !== null) clearInterval(backupInterval);
+
+    // 4. Stop embedded PostgreSQL if this process owns it
+    if (embeddedPostgres && embeddedPostgresStartedByThisProcess) {
+      try {
+        await embeddedPostgres.stop();
+        logger.info("Embedded PostgreSQL stopped");
+      } catch (err) {
+        logger.error({ err }, "Failed to stop embedded PostgreSQL cleanly");
+      }
+    }
+
+    // 5. Close the DB connection pool
+    try {
+      await (db as any).$client?.end();
+    } catch (err) {
+      logger.error({ err }, "Failed to close DB connection pool cleanly");
+    }
+
+    // 6. Force-exit after a grace period in case of hung connections
+    setTimeout(() => process.exit(0), 5000).unref();
+  };
+
+  process.once("SIGINT", () => {
+    void shutdown("SIGINT");
+  });
+  process.once("SIGTERM", () => {
+    void shutdown("SIGTERM");
+  });
 
   return {
     server,

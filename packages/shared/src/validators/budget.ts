@@ -16,6 +16,9 @@ export const upsertBudgetPolicySchema = z.object({
   hardStopEnabled: z.boolean().optional().default(true),
   notifyEnabled: z.boolean().optional().default(true),
   isActive: z.boolean().optional().default(true),
+  velocityWindowMinutes: z.number().int().min(1).max(1440).optional().nullable().default(null),
+  velocityWarnCents: z.number().int().nonnegative().optional().nullable().default(null),
+  velocityHardCents: z.number().int().nonnegative().optional().nullable().default(null),
 });
 
 export type UpsertBudgetPolicy = z.infer<typeof upsertBudgetPolicySchema>;
