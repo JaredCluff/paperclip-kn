@@ -753,6 +753,7 @@ export function issueService(db: Db) {
             AND ${issueComments.body} ILIKE ${containsPattern} ESCAPE '\\'
         )
       `;
+      // "all" is a sentinel used by agent-facing tooling to bypass status filtering
       if (filters?.status && filters.status !== "all") {
         const statuses = filters.status.split(",").map((s) => s.trim());
         conditions.push(statuses.length === 1 ? eq(issues.status, statuses[0]) : inArray(issues.status, statuses));
