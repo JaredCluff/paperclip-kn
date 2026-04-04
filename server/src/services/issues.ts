@@ -753,7 +753,7 @@ export function issueService(db: Db) {
             AND ${issueComments.body} ILIKE ${containsPattern} ESCAPE '\\'
         )
       `;
-      if (filters?.status) {
+      if (filters?.status && filters.status !== "all") {
         const statuses = filters.status.split(",").map((s) => s.trim());
         conditions.push(statuses.length === 1 ? eq(issues.status, statuses[0]) : inArray(issues.status, statuses));
       }
@@ -826,19 +826,8 @@ export function issueService(db: Db) {
           ELSE 6
         END
       `;
-<<<<<<< HEAD
-      let listQuery = db
-        .select()
-        .from(issues)
-        .where(and(...conditions))
-        .orderBy(hasSearch ? asc(searchOrder) : asc(priorityOrder), asc(priorityOrder), desc(issues.updatedAt))
-        .$dynamic();
-      if (filters?.limit) listQuery = listQuery.limit(filters.limit);
-      if (filters?.offset) listQuery = listQuery.offset(filters.offset);
-      const rows = await listQuery;
-=======
       const canonicalLastActivityAt = issueCanonicalLastActivityAtExpr(companyId);
-      const rows = await db
+      let listQuery = db
         .select()
         .from(issues)
         .where(and(...conditions))
@@ -847,8 +836,11 @@ export function issueService(db: Db) {
           asc(priorityOrder),
           desc(canonicalLastActivityAt),
           desc(issues.updatedAt),
-        );
->>>>>>> origin/master
+        )
+        .$dynamic();
+      if (filters?.limit) listQuery = listQuery.limit(filters.limit);
+      if (filters?.offset) listQuery = listQuery.offset(filters.offset);
+      const rows = await listQuery;
       const withLabels = await withIssueLabels(db, rows);
       const runMap = await activeRunMapForIssues(db, withLabels);
       const withRuns = withActiveRuns(withLabels, runMap);
@@ -1086,7 +1078,6 @@ export function issueService(db: Db) {
       return row ?? null;
     },
 
-<<<<<<< HEAD
     sweepAgentArchives: async (): Promise<{ archived: number }> => {
       const cutoff = new Date(Date.now() - 24 * 60 * 60 * 1000);
       const eligible = await db
@@ -1146,16 +1137,6 @@ export function issueService(db: Db) {
       return row ?? null;
     },
 
-    getById: async (id: string) => {
-      const row = await db
-        .select()
-        .from(issues)
-        .where(eq(issues.id, id))
-        .then((rows) => rows[0] ?? null);
-      if (!row) return null;
-      const [enriched] = await withIssueLabels(db, [row]);
-      return enriched;
-=======
     getById: async (raw: string) => {
       const id = raw.trim();
       if (/^[A-Z]+-\d+$/i.test(id)) {
@@ -1165,7 +1146,6 @@ export function issueService(db: Db) {
         return null;
       }
       return getIssueByUuid(id);
->>>>>>> origin/master
     },
 
     getByIdentifier: async (identifier: string) => {
