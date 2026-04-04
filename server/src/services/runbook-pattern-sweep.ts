@@ -5,8 +5,14 @@ import { documentService } from "./documents.js";
 import { enqueueRunbookReview, type RunbookReviewSnapshot } from "./runbook-review.js";
 import { logger } from "../middleware/logger.js";
 
-const SIMILARITY_THRESHOLD = parseFloat(process.env.RUNBOOK_SIMILARITY_THRESHOLD ?? "0.4");
-const LOOKBACK_DAYS = parseInt(process.env.RUNBOOK_SWEEP_LOOKBACK_DAYS ?? "7", 10);
+const SIMILARITY_THRESHOLD = (() => {
+  const v = parseFloat(process.env.RUNBOOK_SIMILARITY_THRESHOLD ?? "");
+  return isNaN(v) ? 0.4 : v;
+})();
+const LOOKBACK_DAYS = (() => {
+  const v = parseInt(process.env.RUNBOOK_SWEEP_LOOKBACK_DAYS ?? "", 10);
+  return isNaN(v) ? 7 : v;
+})();
 const MIN_CLUSTER_SIZE = 2;
 
 interface ClosedIssueRow {
