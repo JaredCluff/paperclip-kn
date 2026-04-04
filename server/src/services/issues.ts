@@ -1395,10 +1395,11 @@ export function issueService(db: Db) {
         });
       }
 
+      const newStatus = ['done', 'cancelled'].includes(existing.status) ? existing.status : 'todo';
       const updated = await db
         .update(issues)
         .set({
-          status: "todo",
+          status: newStatus,
           assigneeAgentId: null,
           checkoutRunId: null,
           updatedAt: new Date(),

@@ -89,6 +89,17 @@ function deriveRepoNameFromRepoUrl(repoUrl: string | null): string | null {
   }
 }
 
+function assertSafeGitUrl(url: string): void {
+  const SAFE_PROTOCOLS = ['https://', 'http://', 'git://', 'ssh://'];
+  const trimmed = url.trim();
+  if (!SAFE_PROTOCOLS.some(p => trimmed.startsWith(p))) {
+    throw new Error(`Unsafe git URL protocol: ${trimmed}`);
+  }
+  if (trimmed.includes('::') || trimmed.startsWith('-')) {
+    throw new Error(`Unsafe git URL: ${trimmed}`);
+  }
+}
+
 async function ensureManagedProjectWorkspace(input: {
   companyId: string;
   projectId: string;
@@ -127,6 +138,8 @@ async function ensureManagedProjectWorkspace(input: {
     }
     await fs.rm(cwd, { recursive: true, force: true });
   }
+
+  assertSafeGitUrl(input.repoUrl);
 
   try {
     await execFile("git", ["clone", input.repoUrl, cwd], {

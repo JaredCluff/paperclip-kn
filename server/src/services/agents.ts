@@ -261,10 +261,11 @@ export function agentService(db: Db) {
   async function assertNoCycle(agentId: string, reportsTo: string | null | undefined) {
     if (!reportsTo) return;
     if (reportsTo === agentId) throw unprocessable("Agent cannot report to itself");
-
+    const visited = new Set<string>([agentId]);
     let cursor: string | null = reportsTo;
     while (cursor) {
-      if (cursor === agentId) throw unprocessable("Reporting relationship would create cycle");
+      if (visited.has(cursor)) throw unprocessable("Reporting relationship would create cycle");
+      visited.add(cursor);
       const row = await db
         .select({ reportsTo: agents.reportsTo })
         .from(agents)
