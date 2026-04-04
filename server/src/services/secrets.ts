@@ -218,13 +218,22 @@ export function secretService(db: Db) {
       const secret = await getById(secretId);
       if (!secret) throw notFound("Secret not found");
       const provider = getSecretProvider(secret.provider as SecretProvider);
-      const nextVersion = secret.latestVersion + 1;
       const prepared = await provider.createVersion({
         value: input.value,
         externalRef: input.externalRef ?? secret.externalRef ?? null,
       });
 
       return db.transaction(async (tx) => {
+        const latestVersion = await tx
+          .select({ version: companySecretVersions.version })
+          .from(companySecretVersions)
+          .where(eq(companySecretVersions.secretId, secret.id))
+          .orderBy(desc(companySecretVersions.version))
+          .limit(1)
+          .then((rows) => rows[0]?.version ?? 0);
+
+        const nextVersion = latestVersion + 1;
+
         await tx.insert(companySecretVersions).values({
           secretId: secret.id,
           version: nextVersion,
@@ -257,26 +266,32 @@ export function secretService(db: Db) {
       const secret = await getById(secretId);
       if (!secret) throw notFound("Secret not found");
 
-      if (patch.name && patch.name !== secret.name) {
-        const duplicate = await getByName(secret.companyId, patch.name);
-        if (duplicate && duplicate.id !== secret.id) {
-          throw conflict(`Secret already exists: ${patch.name}`);
+      return db.transaction(async (tx) => {
+        if (patch.name && patch.name !== secret.name) {
+          const existing = await tx
+            .select()
+            .from(companySecrets)
+            .where(and(eq(companySecrets.companyId, secret.companyId), eq(companySecrets.name, patch.name)))
+            .limit(1);
+          if (existing.length > 0 && existing[0].id !== secret.id) {
+            throw conflict(`Secret already exists: ${patch.name}`);
+          }
         }
-      }
 
-      return db
-        .update(companySecrets)
-        .set({
-          name: patch.name ?? secret.name,
-          description:
-            patch.description === undefined ? secret.description : patch.description,
-          externalRef:
-            patch.externalRef === undefined ? secret.externalRef : patch.externalRef,
-          updatedAt: new Date(),
-        })
-        .where(eq(companySecrets.id, secret.id))
-        .returning()
-        .then((rows) => rows[0] ?? null);
+        return tx
+          .update(companySecrets)
+          .set({
+            name: patch.name ?? secret.name,
+            description:
+              patch.description === undefined ? secret.description : patch.description,
+            externalRef:
+              patch.externalRef === undefined ? secret.externalRef : patch.externalRef,
+            updatedAt: new Date(),
+          })
+          .where(eq(companySecrets.id, secret.id))
+          .returning()
+          .then((rows) => rows[0] ?? null);
+      });
     },
 
     remove: async (secretId: string) => {

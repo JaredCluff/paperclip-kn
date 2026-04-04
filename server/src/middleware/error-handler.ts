@@ -53,7 +53,8 @@ export function errorHandler(
   }
 
   if (err instanceof ZodError) {
-    res.status(400).json({ error: "Validation error", details: err.errors });
+    attachErrorContext(req, res, { message: "Validation error", details: err.errors }, err);
+    res.status(400).json({ error: "Validation error" });
     return;
   }
 
