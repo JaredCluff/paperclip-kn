@@ -137,8 +137,9 @@ export function routineRoutes(db: Db) {
       return;
     }
     assertCompanyAccess(req, routine.companyId);
-    const limit = Number(req.query.limit ?? 50);
-    const result = await svc.listRuns(routine.id, Number.isFinite(limit) ? limit : 50);
+    const rawLimit = req.query.limit ? Number(req.query.limit) : 50;
+    const limit = Number.isFinite(rawLimit) ? Math.min(rawLimit, 500) : 50;
+    const result = await svc.listRuns(routine.id, limit);
     res.json(result);
   });
 
