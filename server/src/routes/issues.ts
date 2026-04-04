@@ -282,6 +282,7 @@ export function issueRoutes(db: Db, storage: StorageService) {
       includeRoutineExecutions:
         req.query.includeRoutineExecutions === "true" || req.query.includeRoutineExecutions === "1",
       q: req.query.q as string | undefined,
+      excludeAgentArchived: req.query.excludeAgentArchived === "true",
     });
     res.json(result);
   });
@@ -773,6 +774,38 @@ export function issueRoutes(db: Db, storage: StorageService) {
       entityType: "issue",
       entityId: issue.id,
       details: { userId: req.actor.userId },
+    });
+    res.json(removed ?? { ok: true });
+  });
+
+  router.delete("/issues/:id/agent-archive", async (req, res) => {
+    const id = req.params.id as string;
+    const issue = await svc.getById(id);
+    if (!issue) {
+      res.status(404).json({ error: "Issue not found" });
+      return;
+    }
+    assertCompanyAccess(req, issue.companyId);
+    if (req.actor.type !== "board") {
+      res.status(403).json({ error: "Board authentication required" });
+      return;
+    }
+    if (!issue.assigneeAgentId) {
+      res.status(400).json({ error: "Issue has no assigned agent" });
+      return;
+    }
+    const removed = await svc.unarchiveAgent(issue.companyId, issue.id, issue.assigneeAgentId);
+    const actor = getActorInfo(req);
+    await logActivity(db, {
+      companyId: issue.companyId,
+      actorType: actor.actorType,
+      actorId: actor.actorId,
+      agentId: actor.agentId,
+      runId: actor.runId,
+      action: "issue.agent_unarchived",
+      entityType: "issue",
+      entityId: issue.id,
+      details: { agentId: issue.assigneeAgentId },
     });
     res.json(removed ?? { ok: true });
   });
