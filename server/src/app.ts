@@ -1,4 +1,6 @@
 import express, { Router, type Request as ExpressRequest } from "express";
+import helmet from "helmet";
+import rateLimit from "express-rate-limit";
 import path from "node:path";
 import fs from "node:fs";
 import { fileURLToPath } from "node:url";
@@ -78,6 +80,19 @@ export async function createApp(
 ) {
   const app = express();
 
+  app.use(helmet({
+    contentSecurityPolicy: false, // UI handles its own CSP
+    crossOriginEmbedderPolicy: false, // needed for plugin UIs
+  }));
+
+  const authRateLimit = rateLimit({
+    windowMs: 15 * 60 * 1000, // 15 minutes
+    max: 50, // 50 auth attempts per 15 min per IP
+    standardHeaders: true,
+    legacyHeaders: false,
+    message: { error: "Too many requests, please try again later" },
+  });
+
   app.use(express.json({
     // Company import/export payloads can inline full portable packages.
     limit: "10mb",
@@ -105,6 +120,7 @@ export async function createApp(
       resolveSession: opts.resolveSession,
     }),
   );
+  app.use("/api/auth", authRateLimit);
   app.get("/api/auth/get-session", (req, res) => {
     if (req.actor.type !== "board" || !req.actor.userId) {
       res.status(401).json({ error: "Unauthorized" });

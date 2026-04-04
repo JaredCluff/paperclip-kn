@@ -498,6 +498,14 @@ export function createPluginWorkerHandle(
       return;
     }
 
+    // Basic params type safety: handlers expect Record<string, unknown>
+    const params = request.params;
+    if (params !== undefined && params !== null && (typeof params !== 'object' || Array.isArray(params))) {
+      const errorResponse = { jsonrpc: "2.0", id: request.id, error: { code: -32600, message: "Invalid params" } };
+      process.send?.(errorResponse);
+      return;
+    }
+
     try {
       const result = await handler(request.params);
       sendMessage({
