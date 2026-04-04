@@ -40,7 +40,14 @@ type SelectResult = unknown[];
 
 function createDbStub(selectResults: SelectResult[]) {
   const pendingSelects = [...selectResults];
-  const selectWhere = vi.fn(async () => pendingSelects.shift() ?? []);
+  const selectLimit = vi.fn(() => Promise.resolve(pendingSelects.shift() ?? []));
+  const selectWhere = vi.fn(() => {
+    const data = pendingSelects.shift() ?? [];
+    return {
+      limit: vi.fn(() => Promise.resolve(data)),
+      then: (resolve: (value: unknown[]) => unknown) => Promise.resolve(resolve(data)),
+    };
+  });
   const selectThen = vi.fn((resolve: (value: unknown[]) => unknown) =>
     Promise.resolve(resolve(pendingSelects.shift() ?? [])),
   );
@@ -83,6 +90,7 @@ function createDbStub(selectResults: SelectResult[]) {
   return {
     db: { select, insert, update, delete: del },
     selectWhere,
+    selectLimit,
     insertValues,
     insertOnConflictDoNothing,
     deleteWhere,
