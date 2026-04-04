@@ -34,6 +34,7 @@ import { instanceSettingsService } from "./instance-settings.js";
 import { redactCurrentUserText } from "../log-redaction.js";
 import { resolveIssueGoalId, resolveNextIssueGoalId } from "./issue-goal-fallback.js";
 import { getDefaultCompanyGoal } from "./goals.js";
+import { enqueueRunbookReview, type RunbookReviewSnapshot } from "./runbook-review.js";
 
 const ALL_ISSUE_STATUSES = ["backlog", "todo", "in_progress", "in_review", "blocked", "done", "cancelled"];
 const MAX_ISSUE_COMMENT_PAGE_LIMIT = 500;
@@ -1407,7 +1408,7 @@ export function issueService(db: Db) {
         }
       }
 
-      return db.transaction(async (tx) => {
+      const result = await db.transaction(async (tx) => {
         const defaultCompanyGoal = await getDefaultCompanyGoal(tx, existing.companyId);
         const [currentProjectGoalId, nextProjectGoalId] = await Promise.all([
           getProjectDefaultGoalId(tx, existing.companyId, existing.projectId),
@@ -1457,6 +1458,41 @@ export function issueService(db: Db) {
         const [enriched] = await withIssueLabels(tx, [updated]);
         return enriched;
       });
+
+      // Fire-and-forget runbook review when issue is closed with resolution notes
+      if (result && isClosing) {
+        const comments = await db
+          .select({
+            authorAgentId: issueComments.authorAgentId,
+            authorUserId: issueComments.authorUserId,
+            body: issueComments.body,
+            createdAt: issueComments.createdAt,
+          })
+          .from(issueComments)
+          .where(eq(issueComments.issueId, id))
+          .orderBy(issueComments.createdAt);
+
+        const snapshot: RunbookReviewSnapshot = {
+          issueId: result.id,
+          identifier: result.identifier ?? result.id,
+          title: result.title,
+          description: result.description ?? null,
+          resolutionNotes: (result.resolutionNotes ?? ""),
+          status: result.status as "done" | "cancelled",
+          projectId: result.projectId ?? null,
+          companyId: result.companyId,
+          closedAt: new Date().toISOString(),
+          comments: comments.map((c) => ({
+            authorAgentId: c.authorAgentId ?? null,
+            authorUserId: c.authorUserId ?? null,
+            body: c.body,
+            createdAt: c.createdAt.toISOString(),
+          })),
+        };
+        void enqueueRunbookReview(db, snapshot);
+      }
+
+      return result;
     },
 
     remove: (id: string) =>
