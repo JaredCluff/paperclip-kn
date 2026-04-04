@@ -2680,7 +2680,9 @@ export function accessRoutes(
           source: "join_request",
           sourceId: requestId,
           approvedAt: new Date()
-        }).catch(() => {});
+        }).catch((err) => {
+          logger.warn({ err }, "hire approval notification failed");
+        });
       }
 
       res.json(toJoinRequestResponse(approved));
