@@ -2,7 +2,7 @@ import fs from "node:fs/promises";
 import path from "node:path";
 import { execFile as execFileCallback } from "node:child_process";
 import { promisify } from "node:util";
-import { and, asc, desc, eq, gt, inArray, sql } from "drizzle-orm";
+import { and, asc, desc, eq, gt, inArray, notInArray, sql } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
 import type { BillingType } from "@paperclipai/shared";
 import {
@@ -3839,14 +3839,22 @@ export function heartbeatService(db: Db) {
     resumeQueuedRuns,
 
     tickTimers: async (now = new Date()) => {
-      const allAgents = await db.select().from(agents);
+      const allAgents = await db
+        .select({
+          id: agents.id,
+          status: agents.status,
+          runtimeConfig: agents.runtimeConfig,
+          lastHeartbeatAt: agents.lastHeartbeatAt,
+          createdAt: agents.createdAt,
+        })
+        .from(agents)
+        .where(notInArray(agents.status, ["paused", "terminated", "pending_approval"]));
       let checked = 0;
       let enqueued = 0;
       let skipped = 0;
 
       for (const agent of allAgents) {
-        if (agent.status === "paused" || agent.status === "terminated" || agent.status === "pending_approval") continue;
-        const policy = parseHeartbeatPolicy(agent);
+        const policy = parseHeartbeatPolicy(agent as typeof agents.$inferSelect);
         if (!policy.enabled || policy.intervalSec <= 0) continue;
 
         checked += 1;

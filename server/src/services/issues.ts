@@ -78,6 +78,8 @@ export interface IssueFilters {
   originId?: string;
   includeRoutineExecutions?: boolean;
   q?: string;
+  limit?: number;
+  offset?: number;
 }
 
 type IssueRow = typeof issues.$inferSelect;
@@ -696,11 +698,15 @@ export function issueService(db: Db) {
           ELSE 6
         END
       `;
-      const rows = await db
+      let listQuery = db
         .select()
         .from(issues)
         .where(and(...conditions))
-        .orderBy(hasSearch ? asc(searchOrder) : asc(priorityOrder), asc(priorityOrder), desc(issues.updatedAt));
+        .orderBy(hasSearch ? asc(searchOrder) : asc(priorityOrder), asc(priorityOrder), desc(issues.updatedAt))
+        .$dynamic();
+      if (filters?.limit) listQuery = listQuery.limit(filters.limit);
+      if (filters?.offset) listQuery = listQuery.offset(filters.offset);
+      const rows = await listQuery;
       const withLabels = await withIssueLabels(db, rows);
       const runMap = await activeRunMapForIssues(db, withLabels);
       const withRuns = withActiveRuns(withLabels, runMap);
@@ -1413,7 +1419,7 @@ export function issueService(db: Db) {
     },
 
     listLabels: (companyId: string) =>
-      db.select().from(labels).where(eq(labels.companyId, companyId)).orderBy(asc(labels.name), asc(labels.id)),
+      db.select().from(labels).where(eq(labels.companyId, companyId)).orderBy(asc(labels.name), asc(labels.id)).limit(500),
 
     getLabelById: (id: string) =>
       db
@@ -1490,7 +1496,7 @@ export function issueService(db: Db) {
           order === "asc" ? asc(issueComments.id) : desc(issueComments.id),
         );
 
-      const comments = limit ? await query.limit(limit) : await query;
+      const comments = await query.limit(limit ?? 1000);
       const { censorUsernameInLogs } = await instanceSettings.getGeneral();
       return comments.map((comment) => redactIssueComment(comment, censorUsernameInLogs));
     },

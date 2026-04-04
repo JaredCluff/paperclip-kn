@@ -266,6 +266,11 @@ export function issueRoutes(db: Db, storage: StorageService) {
       return;
     }
 
+    const rawLimit = req.query.limit !== undefined ? parseInt(req.query.limit as string, 10) : NaN;
+    const rawOffset = req.query.offset !== undefined ? parseInt(req.query.offset as string, 10) : NaN;
+    const limit = !isNaN(rawLimit) && rawLimit > 0 ? rawLimit : 500;
+    const offset = !isNaN(rawOffset) && rawOffset >= 0 ? rawOffset : undefined;
+
     const result = await svc.list(companyId, {
       status: req.query.status as string | undefined,
       assigneeAgentId: req.query.assigneeAgentId as string | undefined,
@@ -283,6 +288,8 @@ export function issueRoutes(db: Db, storage: StorageService) {
         req.query.includeRoutineExecutions === "true" || req.query.includeRoutineExecutions === "1",
       q: req.query.q as string | undefined,
       excludeAgentArchived: req.query.excludeAgentArchived === "true",
+      limit,
+      offset,
     });
     res.json(result);
   });

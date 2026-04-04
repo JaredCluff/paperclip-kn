@@ -537,7 +537,8 @@ export function agentService(db: Db) {
         .select()
         .from(agentConfigRevisions)
         .where(eq(agentConfigRevisions.agentId, id))
-        .orderBy(desc(agentConfigRevisions.createdAt)),
+        .orderBy(desc(agentConfigRevisions.createdAt))
+        .limit(100),
 
     getConfigRevision: async (id: string, revisionId: string) =>
       db
@@ -612,7 +613,8 @@ export function agentService(db: Db) {
           revokedAt: agentApiKeys.revokedAt,
         })
         .from(agentApiKeys)
-        .where(eq(agentApiKeys.agentId, id)),
+        .where(eq(agentApiKeys.agentId, id))
+        .limit(50),
 
     revokeKey: async (keyId: string) => {
       const rows = await db
