@@ -624,9 +624,10 @@ export function createPluginWorkerHandle(
       TZ: process.env.TZ ?? "UTC",
     };
 
+    const workerMemoryMb = Number(process.env.PLUGIN_WORKER_MAX_MEMORY_MB ?? "512");
     const child = fork(options.entrypointPath, [], {
       stdio: ["pipe", "pipe", "pipe", "ipc"],
-      execArgv: options.execArgv ?? [],
+      execArgv: [`--max-old-space-size=${workerMemoryMb}`, ...(options.execArgv ?? [])],
       env: workerEnv,
       // Don't let the child keep the parent alive
       detached: false,
@@ -749,6 +750,8 @@ export function createPluginWorkerHandle(
         { consecutiveCrashes, maxCrashes: MAX_CONSECUTIVE_CRASHES },
         "max consecutive crashes reached, not restarting",
       );
+      log.error({ pluginId }, "Plugin exceeded max restart attempts — marking as failed");
+      setStatus("crashed");
     }
   }
 

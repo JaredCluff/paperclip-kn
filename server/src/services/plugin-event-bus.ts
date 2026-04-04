@@ -235,6 +235,15 @@ export function createPluginEventBus(): PluginEventBus {
           handler = maybeFn;
         }
 
+        // If subscribing to a plugin-scoped event, enforce ownership
+        if (eventPattern.startsWith("plugin.")) {
+          const parts = eventPattern.split(".");
+          const targetPluginId = parts[1];
+          if (targetPluginId && targetPluginId !== pluginId) {
+            throw new Error(`Plugin '${pluginId}' cannot subscribe to events of plugin '${targetPluginId}'`);
+          }
+        }
+
         subsFor(pluginId).push({ eventPattern, filter, handler });
       },
 
