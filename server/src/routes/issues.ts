@@ -314,6 +314,7 @@ export function issueRoutes(db: Db, storage: StorageService) {
   });
 
   router.delete("/labels/:labelId", async (req, res) => {
+    assertBoard(req);
     const labelId = req.params.labelId as string;
     const existing = await svc.getLabelById(labelId);
     if (!existing) {
@@ -1132,6 +1133,7 @@ export function issueRoutes(db: Db, storage: StorageService) {
   });
 
   router.delete("/issues/:id", async (req, res) => {
+    assertBoard(req);
     const id = req.params.id as string;
     const existing = await svc.getById(id);
     if (!existing) {
@@ -1660,8 +1662,10 @@ export function issueRoutes(db: Db, storage: StorageService) {
     res.setHeader("Content-Type", attachment.contentType || object.contentType || "application/octet-stream");
     res.setHeader("Content-Length", String(attachment.byteSize || object.contentLength || 0));
     res.setHeader("Cache-Control", "private, max-age=60");
-    const filename = attachment.originalFilename ?? "attachment";
-    res.setHeader("Content-Disposition", `inline; filename=\"${filename.replaceAll("\"", "")}\"`);
+    const safeFilename = (attachment.originalFilename ?? "attachment")
+      .replaceAll('"', '')
+      .replaceAll(/[\r\n]/g, '');
+    res.setHeader("Content-Disposition", `inline; filename="${safeFilename}"`);
 
     object.stream.on("error", (err) => {
       next(err);
