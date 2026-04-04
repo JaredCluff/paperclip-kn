@@ -607,17 +607,20 @@ export async function startServer(): Promise<StartedServer> {
           logger.error({ err }, "periodic heartbeat recovery failed");
         });
 
-      void issues
-        .sweepAgentArchives()
-        .then((result) => {
-          if (result.archived > 0) {
-            logger.info({ archived: result.archived }, "agent archive sweep archived tickets");
-          }
-        })
-        .catch((err) => {
-          logger.error({ err }, "agent archive sweep failed");
-        });
     }, config.heartbeatSchedulerIntervalMs);
+
+  setInterval(() => {
+    void issues
+      .sweepAgentArchives()
+      .then((result) => {
+        if (result.archived > 0) {
+          logger.info({ archived: result.archived }, "agent archive sweep archived tickets");
+        }
+      })
+      .catch((err) => {
+        logger.error({ err }, "agent archive sweep failed");
+      });
+  }, 15 * 60 * 1000);
   }
   
   if (config.databaseBackupEnabled) {
