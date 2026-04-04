@@ -235,7 +235,7 @@ async function executePinnedHttpRequest(
     req.end();
   });
 
-  const MAX_RESPONSE_BODY_BYTES = 200 * 1024 * 1024; // 200 MB
+  const MAX_RESPONSE_BODY_BYTES = 50 * 1024 * 1024; // 50 MB
   const chunks: Buffer[] = [];
   let totalBytes = 0;
   await new Promise<void>((resolve, reject) => {

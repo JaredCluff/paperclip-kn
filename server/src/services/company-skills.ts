@@ -1781,6 +1781,11 @@ export function companySkillService(db: Db) {
     const absolutePath = resolveLocalSkillFilePath(skill, normalizedPath);
     if (!absolutePath) throw notFound("Skill file not found");
 
+    // Ensure the target path exists in the inventory before writing — prevents
+    // creating new files outside the declared inventory (e.g. .env, scripts).
+    const fileEntry = skill.fileInventory.find((entry) => entry.path === normalizedPath);
+    if (!fileEntry) throw notFound("Skill file not found");
+
     await fs.mkdir(path.dirname(absolutePath), { recursive: true });
     await fs.writeFile(absolutePath, content, "utf8");
 

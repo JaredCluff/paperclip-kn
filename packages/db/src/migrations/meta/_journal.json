@@ -393,6 +393,13 @@
       "when": 1775567400000,
       "tag": "0055_cascade_deletes",
       "breakpoints": true
+    },
+    {
+      "idx": 56,
+      "version": "7",
+      "when": 1775653800000,
+      "tag": "0056_schema_integrity",
+      "breakpoints": true
     }
   ]
 }

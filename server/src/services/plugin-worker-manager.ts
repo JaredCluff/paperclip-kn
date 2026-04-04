@@ -648,7 +648,9 @@ export function createPluginWorkerHandle(
       stderrReadline = createInterface({ input: child.stderr });
       stderrReadline.on("line", (line: string) => {
         stderrExcerpt = appendStderrExcerpt(stderrExcerpt, line);
-        log.warn({ stream: "stderr" }, `[plugin stderr] ${line}`);
+        // Cap individual line length to prevent log flooding from malicious workers
+        const safeLine = line.length > 1000 ? `${line.slice(0, 1000)}…[truncated]` : line;
+        log.warn({ stream: "stderr" }, `[plugin stderr] ${safeLine}`);
       });
     }
 

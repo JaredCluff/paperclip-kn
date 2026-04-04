@@ -1,4 +1,5 @@
 import {
+  type AnyPgColumn,
   boolean,
   index,
   integer,
@@ -97,7 +98,7 @@ export const routineRuns = pgTable(
     idempotencyKey: text("idempotency_key"),
     triggerPayload: jsonb("trigger_payload").$type<Record<string, unknown>>(),
     linkedIssueId: uuid("linked_issue_id").references(() => issues.id, { onDelete: "set null" }),
-    coalescedIntoRunId: uuid("coalesced_into_run_id"),
+    coalescedIntoRunId: uuid("coalesced_into_run_id").references((): AnyPgColumn => routineRuns.id, { onDelete: "set null" }),
     failureReason: text("failure_reason"),
     completedAt: timestamp("completed_at", { withTimezone: true }),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
