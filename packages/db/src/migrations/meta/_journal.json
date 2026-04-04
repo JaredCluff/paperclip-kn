@@ -351,6 +351,27 @@
       "when": 1775308200000,
       "tag": "0049_auth_session_indexes",
       "breakpoints": true
+    },
+    {
+      "idx": 50,
+      "version": "7",
+      "when": 1775394600000,
+      "tag": "0050_agent_api_key_hash_unique",
+      "breakpoints": true
+    },
+    {
+      "idx": 51,
+      "version": "7",
+      "when": 1775481000000,
+      "tag": "0051_documents_latest_revision_fk",
+      "breakpoints": true
+    },
+    {
+      "idx": 52,
+      "version": "7",
+      "when": 1775567400000,
+      "tag": "0052_cascade_deletes",
+      "breakpoints": true
     }
   ]
 }

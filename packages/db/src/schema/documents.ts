@@ -1,6 +1,7 @@
-import { pgTable, uuid, text, integer, timestamp, index } from "drizzle-orm/pg-core";
+import { type AnyPgColumn, pgTable, uuid, text, integer, timestamp, index } from "drizzle-orm/pg-core";
 import { companies } from "./companies.js";
 import { agents } from "./agents.js";
+import { documentRevisions } from "./document_revisions.js";
 
 export const documents = pgTable(
   "documents",
@@ -10,7 +11,7 @@ export const documents = pgTable(
     title: text("title"),
     format: text("format").notNull().default("markdown"),
     latestBody: text("latest_body").notNull(),
-    latestRevisionId: uuid("latest_revision_id"),
+    latestRevisionId: uuid("latest_revision_id").references((): AnyPgColumn => documentRevisions.id, { onDelete: "set null" }),
     latestRevisionNumber: integer("latest_revision_number").notNull().default(1),
     createdByAgentId: uuid("created_by_agent_id").references(() => agents.id, { onDelete: "set null" }),
     createdByUserId: text("created_by_user_id"),

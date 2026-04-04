@@ -8,8 +8,8 @@ export const issueAgentArchives = pgTable(
   {
     id: uuid("id").primaryKey().defaultRandom(),
     companyId: uuid("company_id").notNull().references(() => companies.id),
-    issueId: uuid("issue_id").notNull().references(() => issues.id),
-    agentId: uuid("agent_id").notNull().references(() => agents.id),
+    issueId: uuid("issue_id").notNull().references(() => issues.id, { onDelete: "cascade" }),
+    agentId: uuid("agent_id").notNull().references(() => agents.id, { onDelete: "cascade" }),
     archivedAt: timestamp("archived_at", { withTimezone: true }).notNull().defaultNow(),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
     updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
