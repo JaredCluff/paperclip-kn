@@ -28,6 +28,7 @@ import type {
 } from "@paperclipai/shared";
 import { normalizeAgentUrlKey } from "@paperclipai/shared";
 import { findServerAdapter } from "../adapters/index.js";
+import { assertNotSsrfTarget } from "../adapters/ssrf.js";
 import { resolvePaperclipInstanceRoot } from "../home-paths.js";
 import { notFound, unprocessable } from "../errors.js";
 import { agentService } from "./agents.js";
@@ -1074,6 +1075,7 @@ async function readUrlSkillImports(
   }
 
   if (url.startsWith("http://") || url.startsWith("https://")) {
+    await assertNotSsrfTarget(url);
     const markdown = await fetchText(url);
     const parsedMarkdown = parseFrontmatterMarkdown(markdown);
     const urlObj = new URL(url);
