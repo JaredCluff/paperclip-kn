@@ -49,6 +49,7 @@ import { createPluginHostServiceCleanup } from "./services/plugin-host-service-c
 import { pluginRegistryService } from "./services/plugin-registry.js";
 import { createHostClientHandlers } from "@paperclipai/plugin-sdk";
 import type { BetterAuthSessionResult } from "./auth/better-auth.js";
+import { runRunbookPatternSweep } from "./services/runbook-pattern-sweep.js";
 
 type UiMode = "none" | "static" | "vite-dev";
 const FEEDBACK_EXPORT_FLUSH_INTERVAL_MS = 5_000;
@@ -345,6 +346,13 @@ export async function createApp(
       logger.error({ err }, "Failed to flush pending feedback exports");
     });
   }
+  const RUNBOOK_SWEEP_INTERVAL_MS = 60 * 60 * 1000; // 1 hour
+  const runbookSweepTimer = setInterval(() => {
+    void runRunbookPatternSweep(db).catch((err) => {
+      logger.error({ err }, "Runbook pattern sweep failed");
+    });
+  }, RUNBOOK_SWEEP_INTERVAL_MS);
+  runbookSweepTimer.unref();
   void toolDispatcher.initialize().catch((err) => {
     logger.error({ err }, "Failed to initialize plugin tool dispatcher");
   });
@@ -366,6 +374,7 @@ export async function createApp(
   });
   process.once("exit", () => {
     if (feedbackExportTimer) clearInterval(feedbackExportTimer);
+    clearInterval(runbookSweepTimer);
     devWatcher?.close();
     hostServiceCleanup.disposeAll();
     hostServiceCleanup.teardown();
