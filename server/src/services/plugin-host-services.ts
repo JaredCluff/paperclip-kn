@@ -775,7 +775,11 @@ export function buildHostServices(
       async list(params) {
         const companyId = ensureCompanyId(params.companyId);
         await ensurePluginAvailableForCompany(companyId);
-        return applyWindow((await issues.list(companyId, params as any)) as Issue[], params);
+        const filters = {
+          ...params,
+          status: params.status ?? "backlog,todo,in_progress,in_review,blocked",
+        };
+        return applyWindow((await issues.list(companyId, filters as any)) as Issue[], params);
       },
       async get(params) {
         const companyId = ensureCompanyId(params.companyId);
