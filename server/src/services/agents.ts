@@ -283,17 +283,23 @@ export function agentService(db: Db) {
     const candidateShortname = normalizeAgentUrlKey(candidateName);
     if (!candidateShortname) return;
 
-    const existingAgents = await db
-      .select({
-        id: agents.id,
-        name: agents.name,
-        status: agents.status,
-      })
-      .from(agents)
-      .where(eq(agents.companyId, companyId));
+    const conditions = [
+      eq(agents.companyId, companyId),
+      sql`regexp_replace(lower(trim(${agents.name})), '[^a-z0-9]+', '-', 'g') = ${candidateShortname}`,
+      ne(agents.status, "terminated"),
+    ];
+    if (options?.excludeAgentId) {
+      conditions.push(ne(agents.id, options.excludeAgentId));
+    }
 
-    const hasCollision = hasAgentShortnameCollision(candidateName, existingAgents, options);
-    if (hasCollision) {
+    const existing = await db
+      .select({ id: agents.id })
+      .from(agents)
+      .where(and(...conditions))
+      .limit(1)
+      .then((rows) => rows[0] ?? null);
+
+    if (existing) {
       throw conflict(
         `Agent shortname '${candidateShortname}' is already in use in this company`,
       );
@@ -619,12 +625,17 @@ export function agentService(db: Db) {
 
     orgForCompany: async (companyId: string) => {
       const rows = await db
-        .select()
+        .select({
+          id: agents.id,
+          name: agents.name,
+          role: agents.role,
+          status: agents.status,
+          reportsTo: agents.reportsTo,
+        })
         .from(agents)
         .where(and(eq(agents.companyId, companyId), ne(agents.status, "terminated")));
-      const normalizedRows = rows.map(normalizeAgentRow);
-      const byManager = new Map<string | null, typeof normalizedRows>();
-      for (const row of normalizedRows) {
+      const byManager = new Map<string | null, typeof rows>();
+      for (const row of rows) {
         const key = row.reportsTo ?? null;
         const group = byManager.get(key) ?? [];
         group.push(row);
@@ -682,10 +693,18 @@ export function agentService(db: Db) {
         return { agent: null, ambiguous: false } as const;
       }
 
-      const rows = await db.select().from(agents).where(eq(agents.companyId, companyId));
-      const matches = rows
-        .map(normalizeAgentRow)
-        .filter((agent) => agent.urlKey === urlKey && agent.status !== "terminated");
+      const matchRows = await db
+        .select()
+        .from(agents)
+        .where(
+          and(
+            eq(agents.companyId, companyId),
+            ne(agents.status, "terminated"),
+            sql`regexp_replace(lower(trim(${agents.name})), '[^a-z0-9]+', '-', 'g') = ${urlKey}`,
+          ),
+        )
+        .limit(2);
+      const matches = matchRows.map(normalizeAgentRow);
       if (matches.length === 1) {
         return { agent: matches[0] ?? null, ambiguous: false } as const;
       }

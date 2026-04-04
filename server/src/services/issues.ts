@@ -1734,14 +1734,25 @@ export function issueService(db: Db) {
 
       const explicitAgentMentionIds = extractAgentMentionIds(body);
       if (tokens.size === 0 && explicitAgentMentionIds.length === 0) return [];
-      const rows = await db.select({ id: agents.id, name: agents.name })
-        .from(agents).where(eq(agents.companyId, companyId));
+
       const resolved = new Set<string>(explicitAgentMentionIds);
-      for (const agent of rows) {
-        if (tokens.has(agent.name.toLowerCase())) {
-          resolved.add(agent.id);
+
+      if (tokens.size > 0) {
+        const tokenList = [...tokens];
+        const nameRows = await db
+          .select({ id: agents.id })
+          .from(agents)
+          .where(
+            and(
+              eq(agents.companyId, companyId),
+              or(...tokenList.map((t) => sql`lower(${agents.name}) = ${t}`)),
+            ),
+          );
+        for (const row of nameRows) {
+          resolved.add(row.id);
         }
       }
+
       return [...resolved];
     },
 
