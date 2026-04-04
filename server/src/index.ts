@@ -561,11 +561,15 @@ export async function startServer(): Promise<StartedServer> {
       logger.error({ err }, "startup reconciliation of persisted runtime services failed");
     });
   
+  let heartbeatInterval: ReturnType<typeof setInterval> | null = null;
+  let archiveSweepInterval: ReturnType<typeof setInterval> | null = null;
+  let backupInterval: ReturnType<typeof setInterval> | null = null;
+
   if (config.heartbeatSchedulerEnabled) {
     const heartbeat = heartbeatService(db as any);
     const routines = routineService(db as any);
     const issues = issueService(db as any);
-  
+
     // Reap orphaned running runs at startup while in-memory execution state is empty,
     // then resume any persisted queued runs that were waiting on the previous process.
     void heartbeat
@@ -576,7 +580,7 @@ export async function startServer(): Promise<StartedServer> {
       });
     let heartbeatTickInFlight = false;
 
-    setInterval(() => {
+    heartbeatInterval = setInterval(() => {
       if (heartbeatTickInFlight) {
         logger.warn("Skipping heartbeat tick because previous tick is still running");
         return;
@@ -619,7 +623,7 @@ export async function startServer(): Promise<StartedServer> {
     }, config.heartbeatSchedulerIntervalMs);
 
   let archiveSweepInFlight = false;
-  setInterval(() => {
+  archiveSweepInterval = setInterval(() => {
     if (archiveSweepInFlight) return;
     archiveSweepInFlight = true;
     void issues
@@ -681,11 +685,21 @@ export async function startServer(): Promise<StartedServer> {
       },
       "Automatic database backups enabled",
     );
-    setInterval(() => {
+    backupInterval = setInterval(() => {
       void runScheduledBackup();
     }, backupIntervalMs);
   }
   
+  process.on("uncaughtException", (err) => {
+    console.error("Uncaught exception — shutting down:", err);
+    process.exit(1);
+  });
+
+  process.on("unhandledRejection", (reason) => {
+    console.error("Unhandled promise rejection — shutting down:", reason);
+    process.exit(1);
+  });
+
   await new Promise<void>((resolveListen, rejectListen) => {
     const onError = (err: Error) => {
       server.off("error", onError);
@@ -746,25 +760,46 @@ export async function startServer(): Promise<StartedServer> {
     });
   });
   
-  if (embeddedPostgres && embeddedPostgresStartedByThisProcess) {
-    const shutdown = async (signal: "SIGINT" | "SIGTERM") => {
-      logger.info({ signal }, "Stopping embedded PostgreSQL");
+  const shutdown = async (signal: string) => {
+    logger.info({ signal }, "Received signal, shutting down gracefully");
+
+    // 1. Stop accepting new connections
+    server.close(() => {
+      logger.info("HTTP server closed");
+    });
+
+    // 2. Clear all scheduled intervals
+    if (heartbeatInterval !== null) clearInterval(heartbeatInterval);
+    if (archiveSweepInterval !== null) clearInterval(archiveSweepInterval);
+    if (backupInterval !== null) clearInterval(backupInterval);
+
+    // 3. Stop embedded PostgreSQL if this process owns it
+    if (embeddedPostgres && embeddedPostgresStartedByThisProcess) {
       try {
-        await embeddedPostgres?.stop();
+        await embeddedPostgres.stop();
+        logger.info("Embedded PostgreSQL stopped");
       } catch (err) {
         logger.error({ err }, "Failed to stop embedded PostgreSQL cleanly");
-      } finally {
-        process.exit(0);
       }
-    };
-  
-    process.once("SIGINT", () => {
-      void shutdown("SIGINT");
-    });
-    process.once("SIGTERM", () => {
-      void shutdown("SIGTERM");
-    });
-  }
+    }
+
+    // 4. Close the DB connection pool
+    try {
+      await (db as any).$client?.end();
+    } catch (err) {
+      logger.error({ err }, "Failed to close DB connection pool cleanly");
+    }
+
+    // 5. Force-exit after a grace period in case of hung connections
+    setTimeout(() => process.exit(0), 5000).unref();
+  };
+
+  process.once("SIGINT", () => {
+    void shutdown("SIGINT");
+  });
+  process.once("SIGTERM", () => {
+    void shutdown("SIGTERM");
+  });
 
   return {
     server,
