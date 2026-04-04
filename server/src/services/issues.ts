@@ -23,7 +23,7 @@ import {
   projects,
 } from "@paperclipai/db";
 import { extractAgentMentionIds, extractProjectMentionIds, isUuidLike } from "@paperclipai/shared";
-import { conflict, notFound, unprocessable } from "../errors.js";
+import { badRequest, conflict, notFound, unprocessable } from "../errors.js";
 import {
   defaultIssueExecutionWorkspaceSettingsForProject,
   gateProjectExecutionWorkspacePolicy,
@@ -1325,6 +1325,15 @@ export function issueService(db: Db) {
       if (!existing) return null;
 
       const { labelIds: nextLabelIds, ...issueData } = data;
+
+      const isClosing = issueData.status === "done" || issueData.status === "cancelled";
+      if (isClosing) {
+        const effectiveNotes = (issueData.resolutionNotes ?? existing.resolutionNotes ?? "").trim();
+        if (!effectiveNotes) {
+          throw badRequest("Resolution notes are required when closing or cancelling an issue.");
+        }
+      }
+
       const isolatedWorkspacesEnabled = (await instanceSettings.getExperimental()).enableIsolatedWorkspaces;
       if (!isolatedWorkspacesEnabled) {
         delete issueData.executionWorkspaceId;
