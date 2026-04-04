@@ -1827,31 +1827,45 @@ export function issueService(db: Db) {
     },
 
     getAncestors: async (issueId: string) => {
-      const raw: Array<{
+      type AncestorRow = {
         id: string; identifier: string | null; title: string; description: string | null;
         status: string; priority: string;
         assigneeAgentId: string | null; projectId: string | null; goalId: string | null;
-      }> = [];
-      const visited = new Set<string>([issueId]);
-      const start = await db.select().from(issues).where(eq(issues.id, issueId)).then(r => r[0] ?? null);
-      let currentId = start?.parentId ?? null;
-      while (currentId && !visited.has(currentId) && raw.length < 50) {
-        visited.add(currentId);
-        const parent = await db.select({
-          id: issues.id, identifier: issues.identifier, title: issues.title, description: issues.description,
-          status: issues.status, priority: issues.priority,
-          assigneeAgentId: issues.assigneeAgentId, projectId: issues.projectId,
-          goalId: issues.goalId, parentId: issues.parentId,
-        }).from(issues).where(eq(issues.id, currentId)).then(r => r[0] ?? null);
-        if (!parent) break;
-        raw.push({
-          id: parent.id, identifier: parent.identifier ?? null, title: parent.title, description: parent.description ?? null,
-          status: parent.status, priority: parent.priority,
-          assigneeAgentId: parent.assigneeAgentId ?? null,
-          projectId: parent.projectId ?? null, goalId: parent.goalId ?? null,
-        });
-        currentId = parent.parentId ?? null;
-      }
+      };
+      const cteRows = await db.execute<{
+        id: string; identifier: string | null; title: string; description: string | null;
+        status: string; priority: string;
+        assignee_agent_id: string | null; project_id: string | null; goal_id: string | null;
+      }>(sql`
+        WITH RECURSIVE ancestors AS (
+          SELECT id, parent_id, identifier, title, description, status, priority,
+                 assignee_agent_id, project_id, goal_id, 0 AS depth
+          FROM issues
+          WHERE id = ${issueId}
+          UNION ALL
+          SELECT i.id, i.parent_id, i.identifier, i.title, i.description, i.status, i.priority,
+                 i.assignee_agent_id, i.project_id, i.goal_id, a.depth + 1
+          FROM issues i
+          JOIN ancestors a ON i.id = a.parent_id
+          WHERE a.depth < 50
+        )
+        SELECT id, identifier, title, description, status, priority,
+               assignee_agent_id, project_id, goal_id
+        FROM ancestors
+        WHERE id != ${issueId}
+        ORDER BY depth ASC
+      `);
+      const raw: AncestorRow[] = [...cteRows].map(r => ({
+        id: r.id,
+        identifier: r.identifier ?? null,
+        title: r.title,
+        description: r.description ?? null,
+        status: r.status,
+        priority: r.priority,
+        assigneeAgentId: r.assignee_agent_id ?? null,
+        projectId: r.project_id ?? null,
+        goalId: r.goal_id ?? null,
+      }));
 
       // Batch-fetch referenced projects and goals
       const projectIds = [...new Set(raw.map(a => a.projectId).filter((id): id is string => id != null))];
