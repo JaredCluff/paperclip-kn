@@ -468,20 +468,9 @@ export function budgetService(db: Db, hooks: BudgetServiceHooks = {}) {
     amountObserved: number,
   ) {
     const { start, end } = resolveWindow(policy.windowKind as BudgetWindowKind);
-    const existing = await db
-      .select()
-      .from(budgetIncidents)
-      .where(
-        and(
-          eq(budgetIncidents.policyId, policy.id),
-          eq(budgetIncidents.windowStart, start),
-          eq(budgetIncidents.thresholdType, thresholdType),
-          ne(budgetIncidents.status, "dismissed"),
-        ),
-      )
-      .then((rows) => rows[0] ?? null);
-    if (existing) return existing;
 
+    // Resolve scope outside the transaction — it's a read-only lookup that
+    // does not need to be serialized with the incident insert.
     const scope = await resolveScopeRecord(db, policy.scopeType as BudgetScopeType, policy.scopeId);
     const payload = buildApprovalPayload({
       policy,
@@ -492,40 +481,59 @@ export function budgetService(db: Db, hooks: BudgetServiceHooks = {}) {
       windowEnd: end,
     });
 
-    const approval = (thresholdType === "hard" || thresholdType === "velocity_hard_stop")
-      ? await db
-        .insert(approvals)
+    return db.transaction(async (tx) => {
+      // Re-check inside the transaction to prevent duplicate incidents from
+      // concurrent budget checks both passing the pre-transaction SELECT.
+      const existing = await tx
+        .select()
+        .from(budgetIncidents)
+        .where(
+          and(
+            eq(budgetIncidents.policyId, policy.id),
+            eq(budgetIncidents.windowStart, start),
+            eq(budgetIncidents.thresholdType, thresholdType),
+            ne(budgetIncidents.status, "dismissed"),
+          ),
+        )
+        .then((rows) => rows[0] ?? null);
+      if (existing) return existing;
+
+      const approval = (thresholdType === "hard" || thresholdType === "velocity_hard_stop")
+        ? await tx
+          .insert(approvals)
+          .values({
+            companyId: policy.companyId,
+            type: "budget_override_required",
+            requestedByUserId: null,
+            requestedByAgentId: null,
+            status: "pending",
+            payload,
+          })
+          .returning()
+          .then((rows) => rows[0] ?? null)
+        : null;
+
+      return tx
+        .insert(budgetIncidents)
         .values({
           companyId: policy.companyId,
-          type: "budget_override_required",
-          requestedByUserId: null,
-          requestedByAgentId: null,
-          status: "pending",
-          payload,
+          policyId: policy.id,
+          scopeType: policy.scopeType,
+          scopeId: policy.scopeId,
+          metric: policy.metric,
+          windowKind: policy.windowKind,
+          windowStart: start,
+          windowEnd: end,
+          thresholdType,
+          amountLimit: policy.amount,
+          amountObserved,
+          status: "open",
+          approvalId: approval?.id ?? null,
         })
+        .onConflictDoNothing()
         .returning()
-        .then((rows) => rows[0] ?? null)
-      : null;
-
-    return db
-      .insert(budgetIncidents)
-      .values({
-        companyId: policy.companyId,
-        policyId: policy.id,
-        scopeType: policy.scopeType,
-        scopeId: policy.scopeId,
-        metric: policy.metric,
-        windowKind: policy.windowKind,
-        windowStart: start,
-        windowEnd: end,
-        thresholdType,
-        amountLimit: policy.amount,
-        amountObserved,
-        status: "open",
-        approvalId: approval?.id ?? null,
-      })
-      .returning()
-      .then((rows) => rows[0] ?? null);
+        .then((rows) => rows[0] ?? null);
+    });
   }
 
   async function resolveOpenSoftIncidents(policyId: string) {

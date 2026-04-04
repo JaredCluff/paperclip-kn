@@ -1300,27 +1300,8 @@ export function heartbeatService(db: Db) {
     lastRunId: string | null;
     lastError: string | null;
   }) {
-    const existing = await getTaskSession(
-      input.companyId,
-      input.agentId,
-      input.adapterType,
-      input.taskKey,
-    );
-    if (existing) {
-      return db
-        .update(agentTaskSessions)
-        .set({
-          sessionParamsJson: input.sessionParamsJson,
-          sessionDisplayId: input.sessionDisplayId,
-          lastRunId: input.lastRunId,
-          lastError: input.lastError,
-          updatedAt: new Date(),
-        })
-        .where(eq(agentTaskSessions.id, existing.id))
-        .returning()
-        .then((rows) => rows[0] ?? null);
-    }
-
+    // Atomic upsert against the unique index on (companyId, agentId,
+    // adapterType, taskKey) to prevent TOCTOU races under concurrent calls.
     return db
       .insert(agentTaskSessions)
       .values({
@@ -1332,6 +1313,21 @@ export function heartbeatService(db: Db) {
         sessionDisplayId: input.sessionDisplayId,
         lastRunId: input.lastRunId,
         lastError: input.lastError,
+      })
+      .onConflictDoUpdate({
+        target: [
+          agentTaskSessions.companyId,
+          agentTaskSessions.agentId,
+          agentTaskSessions.adapterType,
+          agentTaskSessions.taskKey,
+        ],
+        set: {
+          sessionParamsJson: input.sessionParamsJson,
+          sessionDisplayId: input.sessionDisplayId,
+          lastRunId: input.lastRunId,
+          lastError: input.lastError,
+          updatedAt: new Date(),
+        },
       })
       .returning()
       .then((rows) => rows[0] ?? null);

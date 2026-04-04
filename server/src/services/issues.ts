@@ -1027,6 +1027,17 @@ export function issueService(db: Db) {
           values.cancelledAt = new Date();
         }
 
+        if (values.parentId) {
+          const [parent] = await tx
+            .select({ id: issues.id })
+            .from(issues)
+            .where(and(eq(issues.id, values.parentId), eq(issues.companyId, companyId)))
+            .limit(1);
+          if (!parent) {
+            throw notFound("Parent issue not found");
+          }
+        }
+
         const [issue] = await tx.insert(issues).values(values).returning();
         if (inputLabelIds) {
           await syncIssueLabels(issue.id, companyId, inputLabelIds, tx);
@@ -1105,6 +1116,17 @@ export function issueService(db: Db) {
         (issueData.assigneeUserId !== undefined && issueData.assigneeUserId !== existing.assigneeUserId)
       ) {
         patch.checkoutRunId = null;
+      }
+
+      if (issueData.parentId) {
+        const [parent] = await db
+          .select({ id: issues.id })
+          .from(issues)
+          .where(and(eq(issues.id, issueData.parentId), eq(issues.companyId, existing.companyId)))
+          .limit(1);
+        if (!parent) {
+          throw notFound("Parent issue not found");
+        }
       }
 
       return db.transaction(async (tx) => {
