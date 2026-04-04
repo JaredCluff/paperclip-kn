@@ -11,6 +11,7 @@ import {
   heartbeatRuns,
   executionWorkspaces,
   issueAttachments,
+  issueAgentArchives,
   issueInboxArchives,
   issueLabels,
   issueComments,
@@ -68,6 +69,7 @@ export interface IssueFilters {
   assigneeUserId?: string;
   touchedByUserId?: string;
   inboxArchivedByUserId?: string;
+  excludeAgentArchived?: boolean;
   unreadForUserId?: string;
   projectId?: string;
   parentId?: string;
@@ -643,6 +645,15 @@ export function issueService(db: Db) {
       if (inboxArchivedByUserId) {
         conditions.push(inboxVisibleForUserCondition(companyId, inboxArchivedByUserId));
       }
+      if (filters?.excludeAgentArchived) {
+        conditions.push(
+          sql<boolean>`NOT EXISTS (
+            SELECT 1 FROM ${issueAgentArchives}
+            WHERE ${issueAgentArchives.issueId} = ${issues.id}
+              AND ${issueAgentArchives.agentId} = ${issues.assigneeAgentId}
+          )`,
+        );
+      }
       if (unreadForUserId) {
         conditions.push(unreadForUserCondition(companyId, unreadForUserId));
       }
@@ -821,6 +832,64 @@ export function issueService(db: Db) {
             eq(issueInboxArchives.companyId, companyId),
             eq(issueInboxArchives.issueId, issueId),
             eq(issueInboxArchives.userId, userId),
+          ),
+        )
+        .returning();
+      return row ?? null;
+    },
+
+    sweepAgentArchives: async (): Promise<{ archived: number }> => {
+      const cutoff = new Date(Date.now() - 24 * 60 * 60 * 1000);
+      const eligible = await db
+        .select({
+          id: issues.id,
+          companyId: issues.companyId,
+          assigneeAgentId: issues.assigneeAgentId,
+        })
+        .from(issues)
+        .where(
+          and(
+            inArray(issues.status, ["done", "cancelled"]),
+            sql<boolean>`${issues.assigneeAgentId} IS NOT NULL`,
+            sql<boolean>`(
+              (${issues.completedAt} IS NOT NULL AND ${issues.completedAt} < ${cutoff})
+              OR (${issues.cancelledAt} IS NOT NULL AND ${issues.cancelledAt} < ${cutoff})
+            )`,
+            sql<boolean>`NOT EXISTS (
+              SELECT 1 FROM ${issueAgentArchives}
+              WHERE ${issueAgentArchives.issueId} = ${issues.id}
+                AND ${issueAgentArchives.agentId} = ${issues.assigneeAgentId}
+            )`,
+          ),
+        );
+
+      if (eligible.length === 0) return { archived: 0 };
+
+      const now = new Date();
+      await db
+        .insert(issueAgentArchives)
+        .values(
+          eligible.map((row) => ({
+            companyId: row.companyId,
+            issueId: row.id,
+            agentId: row.assigneeAgentId!,
+            archivedAt: now,
+            updatedAt: now,
+          })),
+        )
+        .onConflictDoNothing();
+
+      return { archived: eligible.length };
+    },
+
+    unarchiveAgent: async (companyId: string, issueId: string, agentId: string) => {
+      const [row] = await db
+        .delete(issueAgentArchives)
+        .where(
+          and(
+            eq(issueAgentArchives.companyId, companyId),
+            eq(issueAgentArchives.issueId, issueId),
+            eq(issueAgentArchives.agentId, agentId),
           ),
         )
         .returning();
@@ -1057,6 +1126,24 @@ export function issueService(db: Db) {
           .returning()
           .then((rows) => rows[0] ?? null);
         if (!updated) return null;
+        // If re-opening a terminal issue, clear the agent archive record
+        if (
+          issueData.status &&
+          issueData.status !== "done" &&
+          issueData.status !== "cancelled" &&
+          (existing.status === "done" || existing.status === "cancelled") &&
+          existing.assigneeAgentId
+        ) {
+          await tx
+            .delete(issueAgentArchives)
+            .where(
+              and(
+                eq(issueAgentArchives.companyId, existing.companyId),
+                eq(issueAgentArchives.issueId, existing.id),
+                eq(issueAgentArchives.agentId, existing.assigneeAgentId),
+              ),
+            );
+        }
         if (nextLabelIds !== undefined) {
           await syncIssueLabels(updated.id, existing.companyId, nextLabelIds, tx);
         }
