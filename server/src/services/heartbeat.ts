@@ -1381,7 +1381,7 @@ export function heartbeatService(db: Db) {
     status: string,
     patch?: Partial<typeof heartbeatRuns.$inferInsert>,
   ) {
-    const TERMINAL = new Set(["succeeded", "failed", "cancelled"]);
+    const TERMINAL = new Set(["succeeded", "failed", "cancelled", "timed_out"]);
 
     // Fetch current status to guard against backwards transitions
     const current = await db
@@ -1396,12 +1396,19 @@ export function heartbeatService(db: Db) {
       return null; // Don't allow any transition out of terminal state
     }
 
-    const updated = await db
+    const casResult = await db
       .update(heartbeatRuns)
       .set({ status, ...patch, updatedAt: new Date() })
-      .where(eq(heartbeatRuns.id, runId))
+      .where(and(eq(heartbeatRuns.id, runId), eq(heartbeatRuns.status, current?.status ?? status)))
       .returning()
       .then((rows) => rows[0] ?? null);
+
+    if (casResult === null) {
+      // Another process beat us to the transition — treat as idempotent success
+      return null;
+    }
+
+    const updated = casResult;
 
     if (updated) {
       publishLiveEvent({
