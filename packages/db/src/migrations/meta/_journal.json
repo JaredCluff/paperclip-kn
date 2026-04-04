@@ -344,6 +344,13 @@
       "when": 1775221800000,
       "tag": "0048_performance_indexes",
       "breakpoints": true
+    },
+    {
+      "idx": 49,
+      "version": "7",
+      "when": 1775308200000,
+      "tag": "0049_auth_session_indexes",
+      "breakpoints": true
     }
   ]
 }
