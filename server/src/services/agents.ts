@@ -285,7 +285,7 @@ export function agentService(db: Db) {
 
     const conditions = [
       eq(agents.companyId, companyId),
-      sql`regexp_replace(lower(trim(${agents.name})), '[^a-z0-9]+', '-', 'g') = ${candidateShortname}`,
+      sql`regexp_replace(regexp_replace(lower(trim(${agents.name})), '[^a-z0-9]+', '-', 'g'), '^-+|-+$', '', 'g') = ${candidateShortname}`,
       ne(agents.status, "terminated"),
     ];
     if (options?.excludeAgentId) {
@@ -700,7 +700,7 @@ export function agentService(db: Db) {
           and(
             eq(agents.companyId, companyId),
             ne(agents.status, "terminated"),
-            sql`regexp_replace(lower(trim(${agents.name})), '[^a-z0-9]+', '-', 'g') = ${urlKey}`,
+            sql`regexp_replace(regexp_replace(lower(trim(${agents.name})), '[^a-z0-9]+', '-', 'g'), '^-+|-+$', '', 'g') = ${urlKey}`,
           ),
         )
         .limit(2);
