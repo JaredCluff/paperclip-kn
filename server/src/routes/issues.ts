@@ -341,8 +341,10 @@ export function issueRoutes(
 
     const rawLimit = req.query.limit !== undefined ? parseInt(req.query.limit as string, 10) : NaN;
     const rawOffset = req.query.offset !== undefined ? parseInt(req.query.offset as string, 10) : NaN;
-    const limit = !isNaN(rawLimit) && rawLimit > 0 ? rawLimit : 500;
-    const offset = !isNaN(rawOffset) && rawOffset >= 0 ? rawOffset : undefined;
+    const MAX_ISSUES_LIMIT = 1000;
+    const MAX_ISSUES_OFFSET = 100_000;
+    const limit = !isNaN(rawLimit) && rawLimit > 0 ? Math.min(rawLimit, MAX_ISSUES_LIMIT) : 500;
+    const offset = !isNaN(rawOffset) && rawOffset >= 0 ? Math.min(rawOffset, MAX_ISSUES_OFFSET) : undefined;
 
     const result = await svc.list(companyId, {
       status: req.query.status as string | undefined,
