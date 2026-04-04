@@ -337,6 +337,13 @@
       "when": 1775221704000,
       "tag": "0047_issue_agent_archives",
       "breakpoints": true
+    },
+    {
+      "idx": 48,
+      "version": "7",
+      "when": 1775221800000,
+      "tag": "0048_performance_indexes",
+      "breakpoints": true
     }
   ]
 }
