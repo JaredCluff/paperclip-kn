@@ -9,6 +9,7 @@ import type { Db } from "@paperclipai/db";
 import { workspaceRuntimeServices } from "@paperclipai/db";
 import { and, desc, eq, inArray } from "drizzle-orm";
 import { asNumber, asString, parseObject, renderTemplate } from "../adapters/utils.js";
+import { assertNotSsrfTarget } from "../adapters/ssrf.js";
 import { resolveHomeAwarePath } from "../home-paths.js";
 import type { WorkspaceOperationRecorder } from "./workspace-operations.js";
 
@@ -464,6 +465,8 @@ async function provisionExecutionWorktree(input: {
   created: boolean;
   recorder?: WorkspaceOperationRecorder | null;
 }) {
+  // SECURITY: provisionCommand originates from project executionWorkspacePolicy.workspaceStrategy,
+  // which is restricted to board members only (agents are blocked at the route layer in projects.ts).
   const provisionCommand = asString(input.strategy.provisionCommand, "").trim();
   if (!provisionCommand) return;
 
@@ -712,6 +715,9 @@ export async function cleanupExecutionWorkspaceArtifacts(input: {
     projectWorkspaceCwd: input.projectWorkspace?.cwd ?? null,
   });
   const createdByRuntime = input.workspace.metadata?.createdByRuntime === true;
+  // SECURITY: cleanupCommand and teardownCommand originate from project workspace settings and
+  // executionWorkspacePolicy.workspaceStrategy respectively. Both are restricted to board members
+  // only (agents are blocked at the route layer in projects.ts).
   const cleanupCommands = [
     input.projectWorkspace?.cleanupCommand ?? null,
     input.teardownCommand ?? null,
@@ -922,6 +928,9 @@ async function waitForReadiness(input: {
   const timeoutSec = Math.max(1, asNumber(readiness.timeoutSec, 30));
   const intervalMs = Math.max(100, asNumber(readiness.intervalMs, 500));
   const deadline = Date.now() + timeoutSec * 1000;
+  // Validate the readiness URL against SSRF targets before polling.
+  // The URL originates from user-configurable workspace/project settings.
+  await assertNotSsrfTarget(input.url);
   let lastError = "service did not become ready";
   while (Date.now() < deadline) {
     try {

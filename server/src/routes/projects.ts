@@ -9,8 +9,8 @@ import {
 } from "@paperclipai/shared";
 import { validate } from "../middleware/validate.js";
 import { projectService, logActivity } from "../services/index.js";
-import { conflict } from "../errors.js";
-import { assertCompanyAccess, getActorInfo } from "./authz.js";
+import { conflict, forbidden } from "../errors.js";
+import { assertBoard, assertCompanyAccess, getActorInfo } from "./authz.js";
 
 export function projectRoutes(db: Db) {
   const router = Router();
@@ -78,6 +78,23 @@ export function projectRoutes(db: Db) {
     };
 
     const { workspace, ...projectData } = req.body as CreateProjectPayload;
+
+    // Only board members may designate a lead agent for a project.
+    // An agent setting itself (or any agent) as project lead is a privilege-escalation risk.
+    if (req.actor.type === "agent" && (projectData as Record<string, unknown>).leadAgentId !== undefined) {
+      throw forbidden("Agents cannot set project lead agent");
+    }
+
+    // Agents must not be able to set shell command fields (RCE risk).
+    // Strip dangerous command fields from agent requests; board members retain full access.
+    if (req.actor.type === "agent") {
+      delete (projectData as Record<string, unknown>).executionWorkspacePolicy;
+      if (workspace) {
+        delete (workspace as Record<string, unknown>).setupCommand;
+        delete (workspace as Record<string, unknown>).cleanupCommand;
+      }
+    }
+
     const project = await svc.create(companyId, projectData);
     let createdWorkspaceId: string | null = null;
     if (workspace) {
@@ -120,6 +137,19 @@ export function projectRoutes(db: Db) {
     if (typeof body.archivedAt === "string") {
       body.archivedAt = new Date(body.archivedAt);
     }
+
+    // Only board members may change the lead agent for a project.
+    // Reject agent requests that attempt to set or clear leadAgentId.
+    if (req.actor.type === "agent" && body.leadAgentId !== undefined) {
+      throw forbidden("Agents cannot set project lead agent");
+    }
+
+    // Agents must not be able to set shell command fields (RCE risk).
+    // executionWorkspacePolicy contains provisionCommand/teardownCommand in workspaceStrategy.
+    if (req.actor.type === "agent") {
+      delete body.executionWorkspacePolicy;
+    }
+
     const project = await svc.update(id, body);
     if (!project) {
       res.status(404).json({ error: "Project not found" });
@@ -161,7 +191,16 @@ export function projectRoutes(db: Db) {
       return;
     }
     assertCompanyAccess(req, existing.companyId);
-    const workspace = await svc.createWorkspace(id, req.body);
+
+    // Agents must not be able to set shell command fields (RCE risk).
+    // setupCommand and cleanupCommand are executed as shell commands by workspace-runtime.
+    const workspaceData = { ...req.body };
+    if (req.actor.type === "agent") {
+      delete workspaceData.setupCommand;
+      delete workspaceData.cleanupCommand;
+    }
+
+    const workspace = await svc.createWorkspace(id, workspaceData);
     if (!workspace) {
       res.status(422).json({ error: "Invalid project workspace payload" });
       return;
@@ -204,7 +243,16 @@ export function projectRoutes(db: Db) {
         res.status(404).json({ error: "Project workspace not found" });
         return;
       }
-      const workspace = await svc.updateWorkspace(id, workspaceId, req.body);
+
+      // Agents must not be able to set shell command fields (RCE risk).
+      // setupCommand and cleanupCommand are executed as shell commands by workspace-runtime.
+      const patchData = { ...req.body };
+      if (req.actor.type === "agent") {
+        delete patchData.setupCommand;
+        delete patchData.cleanupCommand;
+      }
+
+      const workspace = await svc.updateWorkspace(id, workspaceId, patchData);
       if (!workspace) {
         res.status(422).json({ error: "Invalid project workspace payload" });
         return;
