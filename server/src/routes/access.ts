@@ -2214,8 +2214,6 @@ export function accessRoutes(
               adapterType,
               defaultsPayload: replayMergedDefaults,
               paperclipApiUrl: req.body.paperclipApiUrl ?? null,
-              inboundOpenClawAuthHeader: req.header("x-openclaw-auth") ?? null,
-              inboundOpenClawTokenHeader: req.header("x-openclaw-token") ?? null
             })
           : null;
 
