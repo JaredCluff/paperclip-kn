@@ -3,7 +3,7 @@ import type { Db } from "@paperclipai/db";
 import { createGoalSchema, updateGoalSchema } from "@paperclipai/shared";
 import { validate } from "../middleware/validate.js";
 import { goalService, logActivity } from "../services/index.js";
-import { assertCompanyAccess, getActorInfo } from "./authz.js";
+import { assertBoard, assertCompanyAccess, getActorInfo } from "./authz.js";
 
 export function goalRoutes(db: Db) {
   const router = Router();
@@ -30,6 +30,7 @@ export function goalRoutes(db: Db) {
   router.post("/companies/:companyId/goals", validate(createGoalSchema), async (req, res) => {
     const companyId = req.params.companyId as string;
     assertCompanyAccess(req, companyId);
+    assertBoard(req);
     const goal = await svc.create(companyId, req.body);
     const actor = getActorInfo(req);
     await logActivity(db, {
@@ -46,6 +47,7 @@ export function goalRoutes(db: Db) {
   });
 
   router.patch("/goals/:id", validate(updateGoalSchema), async (req, res) => {
+    assertBoard(req);
     const id = req.params.id as string;
     const existing = await svc.getById(id);
     if (!existing) {
@@ -75,6 +77,7 @@ export function goalRoutes(db: Db) {
   });
 
   router.delete("/goals/:id", async (req, res) => {
+    assertBoard(req);
     const id = req.params.id as string;
     const existing = await svc.getById(id);
     if (!existing) {
