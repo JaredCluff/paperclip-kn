@@ -11,6 +11,7 @@ const MIN_CLUSTER_SIZE = 2;
 
 interface ClosedIssueRow {
   id: string;
+  identifier: string;
   companyId: string;
   projectId: string | null;
   title: string;
@@ -37,6 +38,7 @@ export async function runRunbookPatternSweep(db: Db): Promise<void> {
     const closedIssues = (await db
       .select({
         id: issues.id,
+        identifier: issues.identifier,
         companyId: issues.companyId,
         projectId: issues.projectId,
         title: issues.title,
@@ -152,7 +154,7 @@ export async function runRunbookPatternSweep(db: Db): Promise<void> {
             // Create review issue via agent
             const snapshot: RunbookReviewSnapshot = {
               issueId: canonical.id,
-              identifier: canonical.id,
+              identifier: canonical.identifier,
               title: canonical.title,
               description: canonical.description ?? null,
               resolutionNotes: canonical.resolutionNotes,
