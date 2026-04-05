@@ -19,6 +19,9 @@ import {
   updateIssueWorkProductSchema,
   upsertIssueDocumentSchema,
   updateIssueSchema,
+  getClosedIsolatedExecutionWorkspaceMessage,
+  isClosedIsolatedExecutionWorkspace,
+  type ExecutionWorkspace,
 } from "@paperclipai/shared";
 import { trackAgentTaskCompleted } from "@paperclipai/shared/telemetry";
 import { getTelemetryClient } from "../telemetry.js";
@@ -46,6 +49,7 @@ import { assertCompanyAccess, getActorInfo } from "./authz.js";
 import { shouldWakeAssigneeOnCheckout } from "./issues-checkout-wakeup.js";
 import { isAllowedContentType, MAX_ATTACHMENT_BYTES } from "../attachment-types.js";
 import { queueIssueAssignmentWakeup } from "../services/issue-assignment-wakeup.js";
+import { trackIssueStateTransition } from "../services/issue-lifecycle-langfuse.js";
 
 const MAX_ISSUE_COMMENT_LIMIT = 500;
 const updateIssueRouteSchema = updateIssueSchema.extend({
@@ -232,6 +236,23 @@ export function issueRoutes(
     }
 
     return runToInterrupt?.status === "running" ? runToInterrupt : null;
+  }
+
+  async function getClosedIssueExecutionWorkspace(issue: { executionWorkspaceId?: string | null }) {
+    if (!issue.executionWorkspaceId) return null;
+    const workspace = await executionWorkspacesSvc.getById(issue.executionWorkspaceId);
+    if (!workspace || !isClosedIsolatedExecutionWorkspace(workspace)) return null;
+    return workspace;
+  }
+
+  function respondClosedIssueExecutionWorkspace(
+    res: Response,
+    workspace: Pick<ExecutionWorkspace, "closedAt" | "id" | "mode" | "name" | "status">,
+  ) {
+    res.status(409).json({
+      error: getClosedIsolatedExecutionWorkspaceMessage(workspace),
+      executionWorkspace: workspace,
+    });
   }
 
   async function normalizeIssueIdentifier(rawId: string): Promise<string> {
@@ -1083,6 +1104,13 @@ export function issueRoutes(
       ...updateFields
     } = req.body;
     let interruptedRunId: string | null = null;
+    const closedExecutionWorkspace = await getClosedIssueExecutionWorkspace(existing);
+    const isAgentWorkUpdate = req.actor.type === "agent" && Object.keys(updateFields).length > 0;
+
+    if (closedExecutionWorkspace && (commentBody || isAgentWorkUpdate)) {
+      respondClosedIssueExecutionWorkspace(res, closedExecutionWorkspace);
+      return;
+    }
 
     if (interruptRequested) {
       if (!commentBody) {
@@ -1200,6 +1228,20 @@ export function issueRoutes(
         if (actorAgent) {
           trackAgentTaskCompleted(tc, { agentRole: actorAgent.role });
         }
+      }
+    }
+
+    // Langfuse issue lifecycle spans (fire-and-forget)
+    if (issue.status !== existing.status) {
+      const isTerminal = issue.status === "done" || issue.status === "cancelled" || issue.status === "in_progress";
+      if (isTerminal) {
+        trackIssueStateTransition({
+          issueId: existing.id,
+          companyId: existing.companyId,
+          fromStatus: existing.status,
+          toStatus: issue.status,
+          assigneeAgentId: issue.assigneeAgentId,
+        });
       }
     }
 
@@ -1386,6 +1428,12 @@ export function issueRoutes(
 
     if (req.actor.type === "agent" && req.actor.agentId !== req.body.agentId) {
       res.status(403).json({ error: "Agent can only checkout as itself" });
+      return;
+    }
+
+    const closedExecutionWorkspace = await getClosedIssueExecutionWorkspace(issue);
+    if (closedExecutionWorkspace) {
+      respondClosedIssueExecutionWorkspace(res, closedExecutionWorkspace);
       return;
     }
 
@@ -1607,6 +1655,11 @@ export function issueRoutes(
     }
     assertCompanyAccess(req, issue.companyId);
     if (!(await assertAgentRunCheckoutOwnership(req, res, issue))) return;
+    const closedExecutionWorkspace = await getClosedIssueExecutionWorkspace(issue);
+    if (closedExecutionWorkspace) {
+      respondClosedIssueExecutionWorkspace(res, closedExecutionWorkspace);
+      return;
+    }
 
     const actor = getActorInfo(req);
     const reopenRequested = req.body.reopen === true;
