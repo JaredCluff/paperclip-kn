@@ -37,6 +37,7 @@ import {
 } from "@paperclipai/shared";
 import { resolveHomeAwarePath, resolvePaperclipInstanceRoot } from "../home-paths.js";
 import { notFound, unprocessable } from "../errors.js";
+import { mirrorFeedbackBundleToLangfuse } from "./feedback-langfuse.js";
 import { agentInstructionsService } from "./agent-instructions.js";
 import {
   createFeedbackRedactionState,
@@ -1835,6 +1836,7 @@ export function feedbackService(db: Db, options: FeedbackServiceOptions = {}) {
             })
             .where(eq(feedbackExports.id, row.id));
           sent += 1;
+          mirrorFeedbackBundleToLangfuse(bundle);
         } catch (error) {
           await db
             .update(feedbackExports)
