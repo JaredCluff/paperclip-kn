@@ -49,6 +49,7 @@ import { assertCompanyAccess, getActorInfo } from "./authz.js";
 import { shouldWakeAssigneeOnCheckout } from "./issues-checkout-wakeup.js";
 import { isAllowedContentType, MAX_ATTACHMENT_BYTES } from "../attachment-types.js";
 import { queueIssueAssignmentWakeup } from "../services/issue-assignment-wakeup.js";
+import { trackIssueStateTransition } from "../services/issue-lifecycle-langfuse.js";
 
 const MAX_ISSUE_COMMENT_LIMIT = 500;
 const updateIssueRouteSchema = updateIssueSchema.extend({
@@ -1227,6 +1228,20 @@ export function issueRoutes(
         if (actorAgent) {
           trackAgentTaskCompleted(tc, { agentRole: actorAgent.role });
         }
+      }
+    }
+
+    // Langfuse issue lifecycle spans (fire-and-forget)
+    if (issue.status !== existing.status) {
+      const isTerminal = issue.status === "done" || issue.status === "cancelled" || issue.status === "in_progress";
+      if (isTerminal) {
+        trackIssueStateTransition({
+          issueId: existing.id,
+          companyId: existing.companyId,
+          fromStatus: existing.status,
+          toStatus: issue.status,
+          assigneeAgentId: issue.assigneeAgentId,
+        });
       }
     }
 
