@@ -1233,8 +1233,8 @@ export function issueRoutes(
 
     // Langfuse issue lifecycle spans (fire-and-forget)
     if (issue.status !== existing.status) {
-      const isTerminal = issue.status === "done" || issue.status === "cancelled" || issue.status === "in_progress";
-      if (isTerminal) {
+      const isTrackedTransition = issue.status === "done" || issue.status === "cancelled" || issue.status === "in_progress";
+      if (isTrackedTransition) {
         trackIssueStateTransition({
           issueId: existing.id,
           companyId: existing.companyId,
