@@ -67,7 +67,20 @@ export function deriveAuthTrustedOrigins(config: Config): string[] {
 
 export function createBetterAuthInstance(db: Db, config: Config, trustedOrigins?: string[]): BetterAuthInstance {
   const baseUrl = config.authBaseUrlMode === "explicit" ? config.authPublicBaseUrl : undefined;
-  const secret = process.env.BETTER_AUTH_SECRET ?? process.env.PAPERCLIP_AGENT_JWT_SECRET ?? "paperclip-dev-secret";
+
+  const rawSecret =
+    process.env.BETTER_AUTH_SECRET ??
+    process.env.PAPERCLIP_AGENT_JWT_SECRET ??
+    null;
+
+  if (!rawSecret && config.deploymentMode !== "local_trusted") {
+    throw new Error(
+      "BETTER_AUTH_SECRET must be set when deploymentMode is not local_trusted. " +
+      "Set BETTER_AUTH_SECRET in your environment or .env file.",
+    );
+  }
+
+  const secret = rawSecret ?? "paperclip-dev-secret";
   const effectiveTrustedOrigins = trustedOrigins ?? deriveAuthTrustedOrigins(config);
 
   const publicUrl = process.env.PAPERCLIP_PUBLIC_URL ?? baseUrl;
