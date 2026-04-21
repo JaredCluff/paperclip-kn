@@ -1,4 +1,13 @@
-import type { IssueOriginKind, IssuePriority, IssueStatus } from "../constants.js";
+import type {
+  IssueExecutionDecisionOutcome,
+  IssueExecutionPolicyMode,
+  IssueReferenceSourceKind,
+  IssueExecutionStageType,
+  IssueExecutionStateStatus,
+  IssueOriginKind,
+  IssuePriority,
+  IssueStatus,
+} from "../constants.js";
 import type { Goal } from "./goal.js";
 import type { Project, ProjectWorkspace } from "./project.js";
 import type { ExecutionWorkspace, IssueExecutionWorkspaceSettings } from "./workspace-runtime.js";
@@ -96,6 +105,93 @@ export interface LegacyPlanDocument {
   source: "issue_description";
 }
 
+export interface IssueRelationIssueSummary {
+  id: string;
+  identifier: string | null;
+  title: string;
+  status: IssueStatus;
+  priority: IssuePriority;
+  assigneeAgentId: string | null;
+  assigneeUserId: string | null;
+}
+
+export interface IssueRelation {
+  id: string;
+  companyId: string;
+  issueId: string;
+  relatedIssueId: string;
+  type: "blocks";
+  relatedIssue: IssueRelationIssueSummary;
+}
+
+export interface IssueReferenceSource {
+  kind: IssueReferenceSourceKind;
+  sourceRecordId: string | null;
+  label: string;
+  matchedText: string | null;
+}
+
+export interface IssueRelatedWorkItem {
+  issue: IssueRelationIssueSummary;
+  mentionCount: number;
+  sources: IssueReferenceSource[];
+}
+
+export interface IssueRelatedWorkSummary {
+  outbound: IssueRelatedWorkItem[];
+  inbound: IssueRelatedWorkItem[];
+}
+
+export interface IssueExecutionStagePrincipal {
+  type: "agent" | "user";
+  agentId?: string | null;
+  userId?: string | null;
+}
+
+export interface IssueExecutionStageParticipant extends IssueExecutionStagePrincipal {
+  id: string;
+}
+
+export interface IssueExecutionStage {
+  id: string;
+  type: IssueExecutionStageType;
+  approvalsNeeded: 1;
+  participants: IssueExecutionStageParticipant[];
+}
+
+export interface IssueExecutionPolicy {
+  mode: IssueExecutionPolicyMode;
+  commentRequired: boolean;
+  stages: IssueExecutionStage[];
+}
+
+export interface IssueExecutionState {
+  status: IssueExecutionStateStatus;
+  currentStageId: string | null;
+  currentStageIndex: number | null;
+  currentStageType: IssueExecutionStageType | null;
+  currentParticipant: IssueExecutionStagePrincipal | null;
+  returnAssignee: IssueExecutionStagePrincipal | null;
+  completedStageIds: string[];
+  lastDecisionId: string | null;
+  lastDecisionOutcome: IssueExecutionDecisionOutcome | null;
+}
+
+export interface IssueExecutionDecision {
+  id: string;
+  companyId: string;
+  issueId: string;
+  stageId: string;
+  stageType: IssueExecutionStageType;
+  actorAgentId: string | null;
+  actorUserId: string | null;
+  outcome: IssueExecutionDecisionOutcome;
+  body: string;
+  createdByRunId: string | null;
+  createdAt: Date;
+  updatedAt: Date;
+}
+
 export interface Issue {
   id: string;
   companyId: string;
@@ -121,9 +217,12 @@ export interface Issue {
   originKind?: IssueOriginKind;
   originId?: string | null;
   originRunId?: string | null;
+  originFingerprint?: string | null;
   requestDepth: number;
   billingCode: string | null;
   assigneeAdapterOverrides: IssueAssigneeAdapterOverrides | null;
+  executionPolicy?: IssueExecutionPolicy | null;
+  executionState?: IssueExecutionState | null;
   executionWorkspaceId: string | null;
   executionWorkspacePreference: string | null;
   executionWorkspaceSettings: IssueExecutionWorkspaceSettings | null;
@@ -133,6 +232,10 @@ export interface Issue {
   hiddenAt: Date | null;
   labelIds?: string[];
   labels?: IssueLabel[];
+  blockedBy?: IssueRelationIssueSummary[];
+  blocks?: IssueRelationIssueSummary[];
+  relatedWork?: IssueRelatedWorkSummary;
+  referencedIssueIdentifiers?: string[];
   planDocument?: IssueDocument | null;
   documentSummaries?: IssueDocumentSummary[];
   legacyPlanDocument?: LegacyPlanDocument | null;
