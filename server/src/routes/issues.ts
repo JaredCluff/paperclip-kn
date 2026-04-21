@@ -21,6 +21,7 @@ import {
   updateIssueSchema,
   getClosedIsolatedExecutionWorkspaceMessage,
   isClosedIsolatedExecutionWorkspace,
+  isUuidLike,
   type ExecutionWorkspace,
 } from "@paperclipai/shared";
 import { trackAgentTaskCompleted } from "@paperclipai/shared/telemetry";
@@ -360,10 +361,49 @@ export function issueRoutes(
       return;
     }
 
+    // Resolve agent filters: accept either a UUID or an agent url-key (e.g. "cto").
+    // Previously, passing a non-UUID leaked a Postgres parse error as HTTP 500 (AII-193).
+    const resolveAgentFilter = async (
+      raw: string | undefined,
+      paramName: string,
+    ): Promise<{ value: string | undefined; error?: string }> => {
+      if (raw === undefined || raw === "") return { value: undefined };
+      if (isUuidLike(raw)) return { value: raw };
+      const resolved = await agentsSvc.resolveByReference(companyId, raw);
+      if (resolved.agent) return { value: resolved.agent.id };
+      if (resolved.ambiguous) {
+        return {
+          value: undefined,
+          error: `${paramName}=${raw} is ambiguous (multiple agents match); use the agent UUID`,
+        };
+      }
+      return {
+        value: undefined,
+        error: `${paramName}=${raw} is not a valid UUID or known agent reference`,
+      };
+    };
+
+    const assigneeResolved = await resolveAgentFilter(
+      req.query.assigneeAgentId as string | undefined,
+      "assigneeAgentId",
+    );
+    if (assigneeResolved.error) {
+      res.status(400).json({ error: assigneeResolved.error });
+      return;
+    }
+    const participantResolved = await resolveAgentFilter(
+      req.query.participantAgentId as string | undefined,
+      "participantAgentId",
+    );
+    if (participantResolved.error) {
+      res.status(400).json({ error: participantResolved.error });
+      return;
+    }
+
     const result = await svc.list(companyId, {
       status: req.query.status as string | undefined,
-      assigneeAgentId: req.query.assigneeAgentId as string | undefined,
-      participantAgentId: req.query.participantAgentId as string | undefined,
+      assigneeAgentId: assigneeResolved.value,
+      participantAgentId: participantResolved.value,
       assigneeUserId,
       touchedByUserId,
       inboxArchivedByUserId,
