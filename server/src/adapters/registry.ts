@@ -4,6 +4,7 @@ import {
   execute as claudeExecute,
   listClaudeSkills,
   syncClaudeSkills,
+  listClaudeModels,
   testEnvironment as claudeTestEnvironment,
   sessionCodec as claudeSessionCodec,
   getQuotaWindows as claudeGetQuotaWindows,
@@ -85,6 +86,37 @@ import { getDisabledAdapterTypes } from "../services/adapter-plugin-store.js";
 import { processAdapter } from "./process/index.js";
 import { httpAdapter } from "./http/index.js";
 
+function normalizeHermesConfig<T extends { config?: unknown; agent?: unknown }>(ctx: T): T {
+  const config =
+    ctx && typeof ctx === "object" && "config" in ctx && ctx.config && typeof ctx.config === "object"
+      ? (ctx.config as Record<string, unknown>)
+      : null;
+  const agent =
+    ctx && typeof ctx === "object" && "agent" in ctx && ctx.agent && typeof ctx.agent === "object"
+      ? (ctx.agent as Record<string, unknown>)
+      : null;
+  const agentAdapterConfig =
+    agent?.adapterConfig && typeof agent.adapterConfig === "object"
+      ? (agent.adapterConfig as Record<string, unknown>)
+      : null;
+
+  const configCommand =
+    typeof config?.command === "string" && config.command.length > 0 ? config.command : undefined;
+  const agentCommand =
+    typeof agentAdapterConfig?.command === "string" && agentAdapterConfig.command.length > 0
+      ? agentAdapterConfig.command
+      : undefined;
+
+  if (config && !config.hermesCommand && configCommand) {
+    config.hermesCommand = configCommand;
+  }
+  if (agentAdapterConfig && !agentAdapterConfig.hermesCommand && agentCommand) {
+    agentAdapterConfig.hermesCommand = agentCommand;
+  }
+
+  return ctx;
+}
+
 const claudeLocalAdapter: ServerAdapterModule = {
   type: "claude_local",
   execute: claudeExecute,
@@ -94,7 +126,11 @@ const claudeLocalAdapter: ServerAdapterModule = {
   sessionCodec: claudeSessionCodec,
   sessionManagement: getAdapterSessionManagement("claude_local") ?? undefined,
   models: claudeModels,
+  listModels: listClaudeModels,
   supportsLocalAgentJwt: true,
+  supportsInstructionsBundle: true,
+  instructionsPathKey: "instructionsFilePath",
+  requiresMaterializedRuntimeSkills: false,
   agentConfigurationDoc: claudeAgentConfigurationDoc,
   getQuotaWindows: claudeGetQuotaWindows,
 };
@@ -110,6 +146,9 @@ const codexLocalAdapter: ServerAdapterModule = {
   models: codexModels,
   listModels: listCodexModels,
   supportsLocalAgentJwt: true,
+  supportsInstructionsBundle: true,
+  instructionsPathKey: "instructionsFilePath",
+  requiresMaterializedRuntimeSkills: false,
   agentConfigurationDoc: codexAgentConfigurationDoc,
   getQuotaWindows: codexGetQuotaWindows,
 };
@@ -125,6 +164,9 @@ const cursorLocalAdapter: ServerAdapterModule = {
   models: cursorModels,
   listModels: listCursorModels,
   supportsLocalAgentJwt: true,
+  supportsInstructionsBundle: true,
+  instructionsPathKey: "instructionsFilePath",
+  requiresMaterializedRuntimeSkills: true,
   agentConfigurationDoc: cursorAgentConfigurationDoc,
 };
 
@@ -138,6 +180,9 @@ const geminiLocalAdapter: ServerAdapterModule = {
   sessionManagement: getAdapterSessionManagement("gemini_local") ?? undefined,
   models: geminiModels,
   supportsLocalAgentJwt: true,
+  supportsInstructionsBundle: true,
+  instructionsPathKey: "instructionsFilePath",
+  requiresMaterializedRuntimeSkills: true,
   agentConfigurationDoc: geminiAgentConfigurationDoc,
 };
 
@@ -147,6 +192,8 @@ const openclawGatewayAdapter: ServerAdapterModule = {
   testEnvironment: openclawGatewayTestEnvironment,
   models: openclawGatewayModels,
   supportsLocalAgentJwt: false,
+  supportsInstructionsBundle: false,
+  requiresMaterializedRuntimeSkills: false,
   agentConfigurationDoc: openclawGatewayAgentConfigurationDoc,
 };
 
@@ -161,6 +208,9 @@ const openCodeLocalAdapter: ServerAdapterModule = {
   sessionManagement: getAdapterSessionManagement("opencode_local") ?? undefined,
   listModels: listOpenCodeModels,
   supportsLocalAgentJwt: true,
+  supportsInstructionsBundle: true,
+  instructionsPathKey: "instructionsFilePath",
+  requiresMaterializedRuntimeSkills: true,
   agentConfigurationDoc: openCodeAgentConfigurationDoc,
 };
 
@@ -175,18 +225,74 @@ const piLocalAdapter: ServerAdapterModule = {
   models: [],
   listModels: listPiModels,
   supportsLocalAgentJwt: true,
+  supportsInstructionsBundle: true,
+  instructionsPathKey: "instructionsFilePath",
+  requiresMaterializedRuntimeSkills: true,
   agentConfigurationDoc: piAgentConfigurationDoc,
 };
 
+// hermes-paperclip-adapter v0.2.0 predates the authToken field; cast is
+// intentional until hermes ships a matching AdapterExecutionContext type.
+const executeHermesLocal = hermesExecute as unknown as ServerAdapterModule["execute"];
+
 const hermesLocalAdapter: ServerAdapterModule = {
   type: "hermes_local",
-  execute: hermesExecute,
-  testEnvironment: hermesTestEnvironment,
+  execute: async (ctx) => {
+    const normalizedCtx = normalizeHermesConfig(ctx);
+    if (!normalizedCtx.authToken) return executeHermesLocal(normalizedCtx);
+
+    const existingConfig = (normalizedCtx.agent.adapterConfig ?? {}) as Record<string, unknown>;
+    const existingEnv =
+      typeof existingConfig.env === "object" && existingConfig.env !== null && !Array.isArray(existingConfig.env)
+        ? (existingConfig.env as Record<string, string>)
+        : {};
+    const explicitApiKey =
+      typeof existingEnv.PAPERCLIP_API_KEY === "string" && existingEnv.PAPERCLIP_API_KEY.trim().length > 0;
+    const promptTemplate =
+      typeof existingConfig.promptTemplate === "string" && existingConfig.promptTemplate.trim().length > 0
+        ? existingConfig.promptTemplate
+        : "";
+    const authGuardPrompt = [
+      "Paperclip API safety rule:",
+      "Use Authorization: Bearer $PAPERCLIP_API_KEY on every Paperclip API request.",
+      "Use X-Paperclip-Run-Id: $PAPERCLIP_RUN_ID on every Paperclip API request that writes or mutates data, including comments and issue updates.",
+      "Never use a board, browser, or local-board session for Paperclip API writes.",
+    ].join("\n");
+
+    const patchedConfig: Record<string, unknown> = {
+      ...existingConfig,
+      env: {
+        ...existingEnv,
+        ...(!explicitApiKey ? { PAPERCLIP_API_KEY: normalizedCtx.authToken } : {}),
+        PAPERCLIP_RUN_ID: normalizedCtx.runId,
+      },
+    };
+
+    // Only inject the auth guard into promptTemplate when a custom template already exists.
+    // When no custom template is set, Hermes uses its built-in default heartbeat/task prompt —
+    // overwriting it with only the auth guard text would strip the assigned issue/workflow instructions.
+    if (promptTemplate) {
+      patchedConfig.promptTemplate = `${authGuardPrompt}\n\n${promptTemplate}`;
+    }
+
+    const patchedCtx = {
+      ...normalizedCtx,
+      agent: {
+        ...normalizedCtx.agent,
+        adapterConfig: patchedConfig,
+      },
+    };
+
+    return executeHermesLocal(patchedCtx);
+  },
+  testEnvironment: (ctx) => hermesTestEnvironment(normalizeHermesConfig(ctx) as never),
   sessionCodec: hermesSessionCodec,
   listSkills: hermesListSkills,
   syncSkills: hermesSyncSkills,
   models: hermesModels,
   supportsLocalAgentJwt: true,
+  supportsInstructionsBundle: false,
+  requiresMaterializedRuntimeSkills: false,
   agentConfigurationDoc: hermesAgentConfigurationDoc,
   detectModel: () => detectModelFromHermes(),
 };
